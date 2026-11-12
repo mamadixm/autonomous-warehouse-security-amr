@@ -6,7 +6,56 @@
 [![SLAM](https://img.shields.io/badge/SLAM-SLAM__Toolbox-red.svg)](https://github.com/SteveMacenski/slam_toolbox)
 [![OpenCV](https://img.shields.io/badge/Vision-OpenCV_CvBridge-blueviolet.svg)](https://opencv.org/)
 
+**[🇮🇷 راهنمای جامع فارسی (Persian Documentation)](./README_FA.md)** | **[🇬🇧 English Documentation](./README.md)**
+
 An enterprise-ready **Autonomous Mobile Robot (AMR)** engineered for **Warehouse & Industrial Workshop Surveillance**, perimeter security patrols, real-time threat interception, and automated facility monitoring. Built natively on **ROS 2 Jazzy** and simulated in **Gazebo Harmonic (gz-sim 8)** with full hardware-accurate kinematic models, sensor bridges, Nav2 autonomous navigation, SLAM Toolbox, and an OpenCV-driven Finite State Machine (FSM).
+
+---
+
+## ⚡ Quick Start & Installation (For New Users)
+
+Anyone who clones this repository can build and run it out of the box with standard ROS 2 Jazzy:
+
+### 1. Clone the Repository
+```bash
+cd ~
+git clone https://github.com/mamadixm/autonomous-warehouse-security-amr.git amr_project_ws
+cd ~/amr_project_ws
+```
+
+### 2. Install Dependencies
+```bash
+sudo apt update
+sudo apt install -y \
+    ros-jazzy-navigation2 \
+    ros-jazzy-nav2-bringup \
+    ros-jazzy-nav2-simple-commander \
+    ros-jazzy-slam-toolbox \
+    ros-jazzy-ros-gz \
+    ros-jazzy-ros-gz-sim \
+    ros-jazzy-ros-gz-bridge \
+    ros-jazzy-cv-bridge \
+    ros-jazzy-teleop-twist-keyboard \
+    python3-pip python3-opencv
+
+pip install --break-system-packages fastapi uvicorn websockets pillow
+```
+
+### 3. Build Workspace
+```bash
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install
+```
+
+### 4. Single-Command Launch (Autonomous End-to-End Demo)
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/amr_project_ws/install/setup.bash
+
+# Run in low-resource headless mode (no GPU overload):
+ros2 launch amr_command_center full_demo.launch.py headless:=true rviz:=false
+```
+Open your browser to: **`http://localhost:8080`**
 
 ---
 
