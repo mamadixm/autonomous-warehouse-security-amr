@@ -1,0 +1,152 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="security_depot">
+
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Essential System Plugins -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <!-- Ambient Illumination -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 12 0 0 0</pose>
+      <diffuse>0.85 0.85 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+
+    <!-- Floor Surface -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>30 30</size></plane></geometry>
+          <material>
+            <ambient>0.7 0.7 0.72 1</ambient>
+            <diffuse>0.7 0.7 0.72 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ==================== Boundary Enclosure (10x10m Warehouse) ==================== -->
+    <model name="outer_walls">
+      <static>true</static>
+      <!-- North Wall -->
+      <link name="north_wall">
+        <pose>0 5.0 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>10.2 0.2 2.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10.2 0.2 2.0</size></box></geometry>
+          <material><ambient>0.3 0.35 0.4 1</ambient><diffuse>0.3 0.35 0.4 1</diffuse></material>
+        </visual>
+      </link>
+      <!-- South Wall -->
+      <link name="south_wall">
+        <pose>0 -5.0 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>10.2 0.2 2.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>10.2 0.2 2.0</size></box></geometry>
+          <material><ambient>0.3 0.35 0.4 1</ambient><diffuse>0.3 0.35 0.4 1</diffuse></material>
+        </visual>
+      </link>
+      <!-- East Wall -->
+      <link name="east_wall">
+        <pose>5.0 0 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.2 10.0 2.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.2 10.0 2.0</size></box></geometry>
+          <material><ambient>0.3 0.35 0.4 1</ambient><diffuse>0.3 0.35 0.4 1</diffuse></material>
+        </visual>
+      </link>
+      <!-- West Wall -->
+      <link name="west_wall">
+        <pose>-5.0 0 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>0.2 10.0 2.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.2 10.0 2.0</size></box></geometry>
+          <material><ambient>0.3 0.35 0.4 1</ambient><diffuse>0.3 0.35 0.4 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ==================== Interior Partition & Obstacles ==================== -->
+    <model name="interior_partitions">
+      <static>true</static>
+      <!-- Partition Divider -->
+      <link name="divider_wall">
+        <pose>-1.5 1.5 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>4.0 0.2 2.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>4.0 0.2 2.0</size></box></geometry>
+          <material><ambient>0.4 0.45 0.5 1</ambient><diffuse>0.4 0.45 0.5 1</diffuse></material>
+        </visual>
+      </link>
+      <!-- Structural Pillar 1 -->
+      <link name="pillar_1">
+        <pose>2.0 2.0 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><cylinder radius="0.3" length="2.0"/></geometry></collision>
+        <visual name="visual">
+          <geometry><cylinder radius="0.3" length="2.0"/></geometry>
+          <material><ambient>0.25 0.25 0.3 1</ambient><diffuse>0.25 0.25 0.3 1</diffuse></material>
+        </visual>
+      </link>
+      <!-- Structural Pillar 2 -->
+      <link name="pillar_2">
+        <pose>2.0 -2.0 1.0 0 0 0</pose>
+        <collision name="collision"><geometry><cylinder radius="0.3" length="2.0"/></geometry></collision>
+        <visual name="visual">
+          <geometry><cylinder radius="0.3" length="2.0"/></geometry>
+          <material><ambient>0.25 0.25 0.3 1</ambient><diffuse>0.25 0.25 0.3 1</diffuse></material>
+        </visual>
+      </link>
+      <!-- Storage Crate Box -->
+      <link name="crate_stack">
+        <pose>-2.5 -2.5 0.5 0 0 0</pose>
+        <collision name="collision"><geometry><box><size>1.2 1.2 1.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>1.2 1.2 1.0</size></box></geometry>
+          <material><ambient>0.6 0.4 0.2 1</ambient><diffuse>0.6 0.4 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ==================== Security Anomaly Targets (Red Boxes) ==================== -->
+    <model name="target_anomaly_1">
+      <static>true</static>
+      <pose>3.2 0.0 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.95 0.1 0.1 1</ambient><diffuse>0.95 0.1 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="target_anomaly_2">
+      <static>true</static>
+      <pose>-3.0 3.5 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>0.6 0.6 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>0.6 0.6 0.6</size></box></geometry>
+          <material><ambient>0.95 0.1 0.1 1</ambient><diffuse>0.95 0.1 0.1 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

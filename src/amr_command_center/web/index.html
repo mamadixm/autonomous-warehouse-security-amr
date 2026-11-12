@@ -1,0 +1,1219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Autonomous Warehouse Security AMR - Tactical Command Center</title>
+  <style>
+    :root {
+      --bg-dark: #0a0e17;
+      --bg-panel: #111827;
+      --bg-card: #1f2937;
+      --border-color: #374151;
+      --accent-cyan: #06b6d4;
+      --accent-blue: #3b82f6;
+      --accent-green: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --text-main: #f9fafb;
+      --text-muted: #9ca3af;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      overflow-x: hidden;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Top Navigation Bar */
+    header {
+      background-color: var(--bg-panel);
+      border-bottom: 1px solid var(--border-color);
+      padding: 10px 24px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      width: 32px;
+      height: 32px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      font-size: 1.1rem;
+      color: #fff;
+      box-shadow: 0 0 12px rgba(6, 182, 212, 0.4);
+    }
+
+    .brand h1 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-main);
+    }
+
+    .brand-subtitle {
+      font-size: 0.75rem;
+      color: var(--accent-cyan);
+      letter-spacing: 0.1em;
+    }
+
+    .telemetry-bar {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+    }
+
+    .stat-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(31, 41, 55, 0.8);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.8rem;
+    }
+
+    .stat-label {
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+
+    .stat-value {
+      font-family: monospace;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background-color: var(--accent-red);
+      box-shadow: 0 0 8px var(--accent-red);
+    }
+    .status-dot.online {
+      background-color: var(--accent-green);
+      box-shadow: 0 0 8px var(--accent-green);
+    }
+
+    .pill-state {
+      padding: 3px 10px;
+      border-radius: 9999px;
+      font-weight: 700;
+      font-size: 0.75rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      background: #374151;
+      color: #e5e7eb;
+    }
+    .pill-state.PATROL { background: #065f46; color: #a7f3d0; border: 1px solid #10b981; }
+    .pill-state.ALERT { background: #991b1b; color: #fecaca; border: 1px solid #ef4444; animation: pulse-red 1s infinite; }
+    .pill-state.REAR_TURN { background: #b45309; color: #fef3c7; border: 1px solid #f59e0b; animation: pulse-amber 1s infinite; }
+    .pill-state.RETURN_TO_BASE { background: #1e40af; color: #bfdbfe; border: 1px solid #3b82f6; }
+
+    @keyframes pulse-red {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    @keyframes pulse-amber {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
+    .battery-container {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .battery-bar-bg {
+      width: 48px;
+      height: 12px;
+      background: #374151;
+      border-radius: 3px;
+      overflow: hidden;
+      border: 1px solid #4b5563;
+    }
+    .battery-bar-fill {
+      height: 100%;
+      width: 100%;
+      background: var(--accent-green);
+      transition: width 0.3s ease, background 0.3s ease;
+    }
+
+    /* Main Dashboard Grid */
+    main {
+      flex: 1;
+      padding: 20px 24px;
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 20px;
+    }
+
+    @media (max-width: 1180px) {
+      main { grid-template-columns: 1fr; }
+    }
+
+    .col-left, .col-right {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Section Panels */
+    .panel {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .panel-header {
+      background: rgba(31, 41, 55, 0.6);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .panel-title {
+      font-size: 0.9rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #e5e7eb;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-body {
+      padding: 16px;
+    }
+
+    /* Dual Camera Feeds */
+    .camera-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 680px) {
+      .camera-grid { grid-template-columns: 1fr; }
+    }
+
+    .camera-card {
+      background-color: #000;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .camera-tag {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.75);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      z-index: 10;
+    }
+
+    .rec-indicator {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--accent-red);
+      animation: pulse-red 1s infinite;
+    }
+
+    .camera-stream {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+      background: #0d1117;
+      display: block;
+    }
+
+    /* Interactive Map Canvas */
+    .map-container {
+      position: relative;
+      width: 100%;
+      height: 440px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: crosshair;
+    }
+
+    #mapCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .map-controls {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.75rem;
+      color: #94a3b8;
+      display: flex;
+      gap: 12px;
+    }
+
+    /* Alert Banner (Toast / Modal) */
+    #alertBanner {
+      display: none;
+      background: linear-gradient(90deg, #7f1d1d, #991b1b);
+      border: 1px solid #ef4444;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 20px;
+      box-shadow: 0 0 20px rgba(239, 68, 68, 0.35);
+      animation: alert-slide 0.4s ease-out;
+    }
+
+    @keyframes alert-slide {
+      from { transform: translateY(-20px); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+
+    .alert-content {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .alert-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .alert-thumb {
+      width: 60px;
+      height: 45px;
+      border-radius: 4px;
+      object-fit: cover;
+      border: 1px solid #f87171;
+    }
+
+    .alert-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    /* Buttons */
+    .btn {
+      padding: 8px 14px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn-danger { background: var(--accent-red); color: #fff; }
+    .btn-danger:hover { background: #dc2626; box-shadow: 0 0 10px rgba(239, 68, 68, 0.4); }
+
+    .btn-success { background: var(--accent-green); color: #fff; }
+    .btn-success:hover { background: #059669; box-shadow: 0 0 10px rgba(16, 185, 129, 0.4); }
+
+    .btn-primary { background: var(--accent-cyan); color: #0a0e17; font-weight: 700; }
+    .btn-primary:hover { background: #22d3ee; box-shadow: 0 0 10px rgba(6, 182, 212, 0.4); }
+
+    .btn-secondary { background: #374151; color: #f3f4f6; border-color: #4b5563; }
+    .btn-secondary:hover { background: #4b5563; }
+
+    /* Action Control Grid */
+    .action-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    /* Manual Teleop Pad */
+    .teleop-box {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      padding: 12px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+    }
+
+    .pad-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 56px);
+      grid-template-rows: repeat(3, 56px);
+      gap: 8px;
+    }
+
+    .teleop-btn {
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-radius: 8px;
+      color: #f8fafc;
+      font-size: 1.2rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      transition: all 0.1s;
+    }
+    .teleop-btn:active, .teleop-btn.active {
+      background: var(--accent-cyan);
+      color: #0f172a;
+      transform: scale(0.95);
+      box-shadow: 0 0 12px var(--accent-cyan);
+    }
+    .teleop-stop {
+      background: #7f1d1d;
+      border-color: #ef4444;
+      color: #fecaca;
+    }
+    .teleop-stop:active {
+      background: #ef4444;
+      color: #fff;
+    }
+
+    .speed-sliders {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 6px;
+      font-size: 0.75rem;
+      color: #94a3b8;
+    }
+    .speed-sliders input { width: 100%; }
+
+    /* Incident History Table */
+    .incident-table-container {
+      max-height: 280px;
+      overflow-y: auto;
+      border: 1px solid #374151;
+      border-radius: 6px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      text-align: left;
+    }
+
+    th {
+      background: #1f2937;
+      color: #9ca3af;
+      padding: 8px 12px;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      font-weight: 700;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #1f2937;
+      color: #e5e7eb;
+    }
+
+    tr:hover { background: rgba(55, 65, 81, 0.4); }
+
+    .table-thumb {
+      width: 44px;
+      height: 33px;
+      border-radius: 4px;
+      object-fit: cover;
+      border: 1px solid #4b5563;
+      cursor: pointer;
+    }
+
+    /* Modal for Image Preview */
+    #imageModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #imageModal.active { display: flex; }
+    #modalImg {
+      max-width: 90vw;
+      max-height: 85vh;
+      border-radius: 8px;
+      border: 2px solid var(--accent-cyan);
+      box-shadow: 0 0 30px rgba(6, 182, 212, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Real-Time Status Bar -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">🛡️</div>
+      <div>
+        <h1>Autonomous Security AMR</h1>
+        <div class="brand-subtitle">Tactical Command Center</div>
+      </div>
+    </div>
+
+    <div class="telemetry-bar">
+      <!-- Connection Status -->
+      <div class="stat-badge">
+        <div class="status-dot" id="wsDot"></div>
+        <span class="stat-label">Link:</span>
+        <span class="stat-value" id="wsStatusText">DISCONNECTED</span>
+      </div>
+
+      <!-- FSM State Badge -->
+      <div class="stat-badge">
+        <span class="stat-label">State:</span>
+        <span class="pill-state" id="fsmState">OFFLINE</span>
+      </div>
+
+      <!-- Mission Stage Badge -->
+      <div class="stat-badge">
+        <span class="stat-label">Mission:</span>
+        <span class="pill-state" id="missionStage" style="background:#1e3a8a;color:#93c5fd;border:1px solid #3b82f6;">STAGE 1: INIT</span>
+      </div>
+
+      <!-- Security Mode -->
+      <div class="stat-badge">
+        <span class="stat-label">Mode:</span>
+        <span class="stat-value" id="securityMode">AFTER_HOURS</span>
+      </div>
+
+      <!-- Pose Coordinates -->
+      <div class="stat-badge">
+        <span class="stat-label">Pose:</span>
+        <span class="stat-value" id="robotPose">X: 0.00 | Y: 0.00 | 0.0°</span>
+      </div>
+
+      <!-- Battery Bar -->
+      <div class="stat-badge">
+        <span class="stat-label">Bat:</span>
+        <div class="battery-container">
+          <div class="battery-bar-bg">
+            <div class="battery-bar-fill" id="batteryFill"></div>
+          </div>
+          <span class="stat-value" id="batteryText">100%</span>
+        </div>
+      </div>
+
+      <!-- Waypoint Indicator -->
+      <div class="stat-badge">
+        <span class="stat-label">Patrol:</span>
+        <span class="stat-value" id="waypointText">WP 1 / 4</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Left Column: Dual Video Streams & Interactive Map -->
+    <div class="col-left">
+
+      <!-- Urgent Alert Card / Banner -->
+      <div id="alertBanner">
+        <div class="alert-content">
+          <div class="alert-left">
+            <img id="alertThumb" class="alert-thumb" src="" alt="Threat">
+            <div>
+              <div style="font-weight: 800; font-size: 0.95rem; color:#fee2e2;" id="alertTitle">
+                SECURITY INTRUSION DETECTED!
+              </div>
+              <div style="font-size: 0.78rem; color:#fca5a5;" id="alertDesc">
+                Subject detected on FRONT camera at coordinates (0.00, 0.00).
+              </div>
+            </div>
+          </div>
+          <div class="alert-actions">
+            <button class="btn btn-danger" id="btnConfirmAlert">Confirm Intruder</button>
+            <button class="btn btn-secondary" id="btnDismissAlert">False Alarm</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dual Camera Video Feeds -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">📹 360° Dual Surveillance Feeds</span>
+          <span style="font-size: 0.75rem; color: var(--text-muted);">MJPEG • 640x480 • 20 FPS</span>
+        </div>
+        <div class="panel-body">
+          <div class="camera-grid">
+            <!-- Front Camera -->
+            <div class="camera-card">
+              <div class="camera-tag">
+                <div class="rec-indicator"></div>
+                <span>CAM 1: FRONT SURVEILLANCE</span>
+              </div>
+              <img class="camera-stream" id="camFront" src="/stream/front" alt="Front Camera">
+            </div>
+
+            <!-- Rear Camera -->
+            <div class="camera-card">
+              <div class="camera-tag">
+                <div class="rec-indicator"></div>
+                <span>CAM 2: REAR 180° INTERCEPT</span>
+              </div>
+              <img class="camera-stream" id="camRear" src="/stream/rear" alt="Rear Camera">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Interactive Warehouse Map Canvas -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">🗺️ Interactive Facility Map &amp; Click-to-Navigate</span>
+          <span style="font-size: 0.75rem; color: var(--accent-cyan);">Click anywhere to dispatch AMR</span>
+        </div>
+        <div class="panel-body">
+          <div class="map-container">
+            <canvas id="mapCanvas"></canvas>
+            <div class="map-controls">
+              <span>Map: <b id="mapRes">0.05m/px</b></span>
+              <span>Origin: <b id="mapOrigin">[-7.92, -6.63]</b></span>
+              <span id="clickCoords">Click Map: Ready</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right Column: Operator Controls & Incident Database -->
+    <div class="col-right">
+
+      <!-- Operator Dispatch & Action Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">⚡ Autonomous Guard Controls</span>
+        </div>
+        <div class="panel-body" style="display: flex; flex-direction: column; gap: 14px;">
+          <div class="action-grid">
+            <button class="btn btn-primary" id="btnResumePatrol">
+              ▶ Resume Patrol
+            </button>
+            <button class="btn btn-secondary" id="btnReturnToBase">
+              🏠 Return to Base (0,0)
+            </button>
+            <button class="btn btn-danger" id="btnConfirmIntruder">
+              🚨 Confirm Intruder
+            </button>
+            <button class="btn btn-success" id="btnMarkAuthorized">
+              ✅ Mark Authorized / Staff
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Manual Teleoperation Pad -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">🕹️ Manual Teleoperation Override</span>
+          <span style="font-size: 0.75rem; color: var(--text-muted);">WASD Keys Active</span>
+        </div>
+        <div class="panel-body">
+          <div class="teleop-box">
+            <div class="pad-grid">
+              <div></div>
+              <button class="teleop-btn" id="btnFwd" title="Forward (W)">▲</button>
+              <div></div>
+
+              <button class="teleop-btn" id="btnLeft" title="Turn Left (A)">◀</button>
+              <button class="teleop-btn teleop-stop" id="btnStop" title="Emergency Stop (Space)">■</button>
+              <button class="teleop-btn" id="btnRight" title="Turn Right (D)">▶</button>
+
+              <div></div>
+              <button class="teleop-btn" id="btnRev" title="Reverse (S)">▼</button>
+              <div></div>
+            </div>
+
+            <div class="speed-sliders">
+              <div>
+                Linear: <span id="valLinear">0.25</span> m/s
+                <input type="range" id="slideLinear" min="0.05" max="0.6" step="0.05" value="0.25">
+              </div>
+              <div>
+                Angular: <span id="valAngular">0.60</span> rad/s
+                <input type="range" id="slideAngular" min="0.1" max="1.5" step="0.1" value="0.60">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Forensic Incident History Table -->
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">🗄️ Forensic Incident Database</span>
+          <button class="btn btn-secondary" style="padding: 4px 8px; font-size: 0.7rem;" id="btnRefreshIncidents">
+            🔄 Refresh
+          </button>
+        </div>
+        <div class="panel-body" style="padding: 0;">
+          <div class="incident-table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Time</th>
+                  <th>Source</th>
+                  <th>Classification</th>
+                  <th>Status</th>
+                  <th>Snapshot</th>
+                </tr>
+              </thead>
+              <tbody id="incidentTableBody">
+                <tr>
+                  <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 20px;">
+                    Loading security incident records...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+
+  <!-- Image Snapshot Modal -->
+  <div id="imageModal">
+    <img id="modalImg" src="" alt="Snapshot Preview">
+  </div>
+
+  <script>
+    // =========================================================================
+    // WebSocket & Real-Time Telemetry Management
+    // =========================================================================
+    let ws = null;
+    let reconnectTimer = null;
+    let latestTelemetry = null;
+    let activeAlertId = null;
+
+    const wsDot = document.getElementById('wsDot');
+    const wsStatusText = document.getElementById('wsStatusText');
+    const fsmState = document.getElementById('fsmState');
+    const securityMode = document.getElementById('securityMode');
+    const robotPose = document.getElementById('robotPose');
+    const batteryFill = document.getElementById('batteryFill');
+    const batteryText = document.getElementById('batteryText');
+    const waypointText = document.getElementById('waypointText');
+
+    function connectWebSocket() {
+      const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        wsDot.classList.add('online');
+        wsStatusText.textContent = 'CONNECTED';
+        wsStatusText.style.color = '#10b981';
+        if (reconnectTimer) clearInterval(reconnectTimer);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.event === 'telemetry') {
+            updateTelemetry(payload.data);
+          } else if (payload.event === 'alert') {
+            triggerAlertBanner(payload.data);
+          } else if (payload.event === 'mission_stage') {
+            const mStage = document.getElementById('missionStage');
+            if (mStage) {
+              mStage.textContent = payload.data.replace(/_/g, ' ');
+              if (payload.data.includes('COMPLETE') || payload.data.includes('SUCCESS')) {
+                mStage.style.background = '#064e3b';
+                mStage.style.color = '#6ee7b7';
+                mStage.style.border = '1px solid #10b981';
+              } else if (payload.data.includes('ALERT') || payload.data.includes('INTRUDER')) {
+                mStage.style.background = '#7f1d1d';
+                mStage.style.color = '#fca5a5';
+                mStage.style.border = '1px solid #ef4444';
+              } else if (payload.data.includes('STAGE_2') || payload.data.includes('MAPPING')) {
+                mStage.style.background = '#78350f';
+                mStage.style.color = '#fde68a';
+                mStage.style.border = '1px solid #f59e0b';
+              }
+            }
+          }
+        } catch (e) {
+          console.error("WS Parse error:", e);
+        }
+      };
+
+      ws.onclose = () => {
+        wsDot.classList.remove('online');
+        wsStatusText.textContent = 'RECONNECTING...';
+        wsStatusText.style.color = '#ef4444';
+        if (!reconnectTimer) {
+          reconnectTimer = setInterval(connectWebSocket, 2000);
+        }
+      };
+
+      ws.onerror = () => { ws.close(); };
+    }
+
+    function sendCommand(actionPayload) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "operator_command",
+          payload: actionPayload
+        }));
+      }
+    }
+
+    function sendTeleop(linear_x, angular_z) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "teleop",
+          linear_x: linear_x,
+          angular_z: angular_z
+        }));
+      }
+    }
+
+    function updateTelemetry(data) {
+      latestTelemetry = data;
+
+      // Update State Badge
+      fsmState.textContent = data.state || 'UNKNOWN';
+      fsmState.className = 'pill-state ' + (data.state || '');
+
+      // Security Mode
+      securityMode.textContent = data.security_mode || 'AFTER_HOURS';
+
+      // Pose
+      const p = data.pose || {x: 0, y: 0, yaw: 0};
+      const deg = (p.yaw * 180 / Math.PI).toFixed(0);
+      robotPose.textContent = `X: ${p.x.toFixed(2)} | Y: ${p.y.toFixed(2)} | ${deg}°`;
+
+      // Battery
+      const bat = Math.max(0, Math.min(100, data.battery_pct || 100));
+      batteryText.textContent = `${bat.toFixed(0)}%`;
+      batteryFill.style.width = `${bat}%`;
+      if (bat > 40) batteryFill.style.background = '#10b981';
+      else if (bat > 20) batteryFill.style.background = '#f59e0b';
+      else batteryFill.style.background = '#ef4444';
+
+      // Waypoints
+      if (data.total_waypoints) {
+        waypointText.textContent = `WP ${data.current_waypoint} / ${data.total_waypoints}`;
+      }
+
+      // Re-render map with updated robot pose
+      drawMap();
+    }
+
+    // =========================================================================
+    // Alert Notification Banner
+    // =========================================================================
+    const alertBanner = document.getElementById('alertBanner');
+    const alertThumb = document.getElementById('alertThumb');
+    const alertTitle = document.getElementById('alertTitle');
+    const alertDesc = document.getElementById('alertDesc');
+    const btnConfirmAlert = document.getElementById('btnConfirmAlert');
+    const btnDismissAlert = document.getElementById('btnDismissAlert');
+
+    function triggerAlertBanner(alertData) {
+      activeAlertId = alertData.incident_id;
+      alertTitle.textContent = `🚨 SECURITY THREAT: ${alertData.classification}`;
+      const px = alertData.pose ? alertData.pose.x.toFixed(2) : '0.00';
+      const py = alertData.pose ? alertData.pose.y.toFixed(2) : '0.00';
+      alertDesc.textContent = `Detected on ${alertData.camera_source.toUpperCase()} camera at coordinates (${px}, ${py}) at ${alertData.timestamp.substring(11, 19)}`;
+
+      if (alertData.snapshot_path) {
+        const fname = alertData.snapshot_path.split('/').pop();
+        alertThumb.src = `/snapshots/${fname}`;
+        alertThumb.style.display = 'block';
+      } else {
+        alertThumb.style.display = 'none';
+      }
+
+      alertBanner.style.display = 'block';
+      fetchIncidents();
+    }
+
+    btnConfirmAlert.onclick = () => {
+      if (activeAlertId) updateIncidentStatus(activeAlertId, 'CONFIRMED_INTRUDER');
+      alertBanner.style.display = 'none';
+    };
+
+    btnDismissAlert.onclick = () => {
+      if (activeAlertId) updateIncidentStatus(activeAlertId, 'FALSE_ALARM');
+      alertBanner.style.display = 'none';
+    };
+
+    // =========================================================================
+    // Interactive Map Canvas (Floorplan + Click-to-Navigate)
+    // =========================================================================
+    const mapCanvas = document.getElementById('mapCanvas');
+    const ctx = mapCanvas.getContext('2d');
+    let mapImg = new Image();
+    let mapMetadata = null;
+    let incidentPoints = [];
+
+    async function loadMap() {
+      try {
+        const metaRes = await fetch('/api/map/metadata');
+        mapMetadata = await metaRes.json();
+        document.getElementById('mapRes').textContent = `${mapMetadata.resolution}m/px`;
+        document.getElementById('mapOrigin').textContent = `[${mapMetadata.origin[0].toFixed(2)}, ${mapMetadata.origin[1].toFixed(2)}]`;
+
+        mapImg.onload = () => {
+          mapCanvas.width = mapImg.width;
+          mapCanvas.height = mapImg.height;
+          drawMap();
+        };
+        mapImg.src = '/api/map/image';
+      } catch (e) {
+        console.error("Map loading error:", e);
+      }
+    }
+
+    function worldToPixel(wx, wy) {
+      if (!mapMetadata) return {px: 0, py: 0};
+      const px = (wx - mapMetadata.origin[0]) / mapMetadata.resolution;
+      const py = mapMetadata.height - ((wy - mapMetadata.origin[1]) / mapMetadata.resolution);
+      return {px, py};
+    }
+
+    function pixelToWorld(px, py) {
+      if (!mapMetadata) return {wx: 0, wy: 0};
+      const wx = mapMetadata.origin[0] + px * mapMetadata.resolution;
+      const wy = mapMetadata.origin[1] + (mapMetadata.height - py) * mapMetadata.resolution;
+      return {wx, wy};
+    }
+
+    function drawMap() {
+      if (!mapImg.complete || !mapMetadata) return;
+
+      // Draw warehouse floorplan
+      ctx.drawImage(mapImg, 0, 0);
+
+      // Draw logged incident points (red markers)
+      for (const inc of incidentPoints) {
+        const pt = worldToPixel(inc.pos_x, inc.pos_y);
+        ctx.beginPath();
+        ctx.arc(pt.px, pt.py, 5, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ef4444';
+        ctx.fill();
+        ctx.strokeStyle = '#fee2e2';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // Draw base home pose (0, 0)
+      const homePt = worldToPixel(0.0, 0.0);
+      ctx.beginPath();
+      ctx.arc(homePt.px, homePt.py, 7, 0, 2 * Math.PI);
+      ctx.strokeStyle = '#3b82f6';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(59, 130, 246, 0.4)';
+      ctx.fill();
+
+      // Draw AMR Robot position & heading arrow
+      if (latestTelemetry && latestTelemetry.pose) {
+        const rPose = latestTelemetry.pose;
+        const rPt = worldToPixel(rPose.x, rPose.y);
+
+        ctx.save();
+        ctx.translate(rPt.px, rPt.py);
+        // Note: Map image Y is inverted relative to world Y, so invert yaw rotation angle
+        ctx.rotate(-rPose.yaw);
+
+        // Robot footprint circle
+        ctx.beginPath();
+        ctx.arc(0, 0, 9, 0, 2 * Math.PI);
+        ctx.fillStyle = '#06b6d4';
+        ctx.fill();
+        ctx.strokeStyle = '#cffafe';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Forward heading arrow
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(16, 0);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+    }
+
+    // Click-to-Navigate
+    mapCanvas.addEventListener('click', (e) => {
+      const rect = mapCanvas.getBoundingClientRect();
+      const scaleX = mapCanvas.width / rect.width;
+      const scaleY = mapCanvas.height / rect.height;
+      const px = (e.clientX - rect.left) * scaleX;
+      const py = (e.clientY - rect.top) * scaleY;
+
+      const world = pixelToWorld(px, py);
+      document.getElementById('clickCoords').textContent = `Target: (${world.wx.toFixed(2)}, ${world.wy.toFixed(2)})`;
+
+      // Dispatch AMR to clicked target pose
+      sendCommand({
+        action: "GOTO_POSE",
+        x: world.wx,
+        y: world.wy,
+        yaw: 0.0
+      });
+    });
+
+    // =========================================================================
+    // Action Buttons Dispatch
+    // =========================================================================
+    document.getElementById('btnResumePatrol').onclick = () => {
+      sendCommand({ action: "RESUME_PATROL" });
+    };
+
+    document.getElementById('btnReturnToBase').onclick = () => {
+      sendCommand({ action: "RETURN_TO_BASE" });
+    };
+
+    document.getElementById('btnConfirmIntruder').onclick = () => {
+      sendCommand({ action: "CONFIRM_INTRUDER" });
+    };
+
+    document.getElementById('btnMarkAuthorized').onclick = () => {
+      sendCommand({ action: "MARK_AUTHORIZED" });
+    };
+
+    // =========================================================================
+    // Manual Teleoperation Pad & Keyboard Controls
+    // =========================================================================
+    const slideLinear = document.getElementById('slideLinear');
+    const slideAngular = document.getElementById('slideAngular');
+    const valLinear = document.getElementById('valLinear');
+    const valAngular = document.getElementById('valAngular');
+
+    slideLinear.oninput = () => { valLinear.textContent = parseFloat(slideLinear.value).toFixed(2); };
+    slideAngular.oninput = () => { valAngular.textContent = parseFloat(slideAngular.value).toFixed(2); };
+
+    function getLinearSpeed() { return parseFloat(slideLinear.value); }
+    function getAngularSpeed() { return parseFloat(slideAngular.value); }
+
+    let teleopActiveInterval = null;
+
+    function startTeleop(lx, az) {
+      sendTeleop(lx, az);
+      if (teleopActiveInterval) clearInterval(teleopActiveInterval);
+      teleopActiveInterval = setInterval(() => sendTeleop(lx, az), 100);
+    }
+
+    function stopTeleop() {
+      if (teleopActiveInterval) clearInterval(teleopActiveInterval);
+      teleopActiveInterval = null;
+      sendTeleop(0.0, 0.0);
+    }
+
+    function setupTeleopBtn(btnId, lx_mult, az_mult) {
+      const btn = document.getElementById(btnId);
+      btn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        startTeleop(getLinearSpeed() * lx_mult, getAngularSpeed() * az_mult);
+      });
+      btn.addEventListener('mouseup', stopTeleop);
+      btn.addEventListener('mouseleave', stopTeleop);
+      btn.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        startTeleop(getLinearSpeed() * lx_mult, getAngularSpeed() * az_mult);
+      });
+      btn.addEventListener('touchend', stopTeleop);
+    }
+
+    setupTeleopBtn('btnFwd', 1, 0);
+    setupTeleopBtn('btnRev', -1, 0);
+    setupTeleopBtn('btnLeft', 0, 1);
+    setupTeleopBtn('btnRight', 0, -1);
+    document.getElementById('btnStop').onclick = stopTeleop;
+
+    // WASD Keyboard controls
+    const activeKeys = new Set();
+    window.addEventListener('keydown', (e) => {
+      const key = e.key.toLowerCase();
+      if (['w', 'a', 's', 'd', ' '].includes(key) && !activeKeys.has(key)) {
+        activeKeys.add(key);
+        handleKeyboardTeleop();
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      const key = e.key.toLowerCase();
+      if (activeKeys.has(key)) {
+        activeKeys.delete(key);
+        handleKeyboardTeleop();
+      }
+    });
+
+    function handleKeyboardTeleop() {
+      let lx = 0.0;
+      let az = 0.0;
+      if (activeKeys.has('w')) lx += getLinearSpeed();
+      if (activeKeys.has('s')) lx -= getLinearSpeed();
+      if (activeKeys.has('a')) az += getAngularSpeed();
+      if (activeKeys.has('d')) az -= getAngularSpeed();
+      if (activeKeys.has(' ')) { lx = 0.0; az = 0.0; }
+
+      if (activeKeys.size > 0 && !activeKeys.has(' ')) {
+        startTeleop(lx, az);
+      } else {
+        stopTeleop();
+      }
+    }
+
+    // =========================================================================
+    // Incident Database REST API
+    // =========================================================================
+    const incidentTableBody = document.getElementById('incidentTableBody');
+    const imageModal = document.getElementById('imageModal');
+    const modalImg = document.getElementById('modalImg');
+
+    async function fetchIncidents() {
+      try {
+        const res = await fetch('/api/incidents?limit=30');
+        const data = await res.json();
+        const incidents = data.incidents || [];
+        incidentPoints = incidents;
+        drawMap();
+
+        if (incidents.length === 0) {
+          incidentTableBody.innerHTML = `
+            <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 18px;">
+              No incidents recorded. Facility secure.
+            </td></tr>`;
+          return;
+        }
+
+        incidentTableBody.innerHTML = incidents.map(inc => {
+          const timeStr = inc.timestamp ? inc.timestamp.substring(11, 19) : '--:--:--';
+          const thumbHtml = inc.snapshot_url
+            ? `<img src="${inc.snapshot_url}" class="table-thumb" onclick="openModal('${inc.snapshot_url}')" title="Click to enlarge">`
+            : `<span style="color:var(--text-muted);">None</span>`;
+
+          const statusColor = inc.operator_status === 'CONFIRMED_INTRUDER' ? 'var(--accent-red)' :
+                             inc.operator_status === 'AUTHORIZED' ? 'var(--accent-green)' : '#9ca3af';
+
+          return `
+            <tr>
+              <td><b>#${inc.id}</b></td>
+              <td>${timeStr}</td>
+              <td>${inc.camera_source.toUpperCase()}</td>
+              <td style="color:${inc.classification.includes('INTRUDER') ? 'var(--accent-red)' : 'var(--accent-green)'}">
+                ${inc.classification}
+              </td>
+              <td><span style="color:${statusColor}; font-weight:700;">${inc.operator_status}</span></td>
+              <td>${thumbHtml}</td>
+            </tr>
+          `;
+        }).join('');
+      } catch (e) {
+        console.error("Fetch incidents error:", e);
+      }
+    }
+
+    async function updateIncidentStatus(id, status) {
+      try {
+        await fetch(`/api/incidents/${id}/status`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ status: status })
+        });
+        fetchIncidents();
+      } catch (e) {
+        console.error("Status update error:", e);
+      }
+    }
+
+    function openModal(imgUrl) {
+      modalImg.src = imgUrl;
+      imageModal.classList.add('active');
+    }
+
+    imageModal.onclick = () => { imageModal.classList.remove('active'); };
+
+    document.getElementById('btnRefreshIncidents').onclick = fetchIncidents;
+
+    // Initialization on window load
+    window.onload = () => {
+      connectWebSocket();
+      loadMap();
+      fetchIncidents();
+      setInterval(fetchIncidents, 10000); // refresh table every 10s
+    };
+  </script>
+</body>
+</html>

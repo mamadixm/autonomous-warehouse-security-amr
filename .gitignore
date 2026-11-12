@@ -1,0 +1,34 @@
+# ROS 2 Colcon Build Artifacts
+build/
+install/
+log/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+*.egg
+
+# Testing & Linting Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor & OS Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Saved Intruder Snapshots & Logs
+/tmp/intruder_snapshot_*.jpg
+intruder_snapshot_*.jpg
+data/snapshots/*.jpg
+data/snapshots/*.png
+data/*.db
+!data/snapshots/.gitkeep

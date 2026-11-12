@@ -1,0 +1,23 @@
+patrol_interceptor_node:
+  ros__parameters:
+    use_sim_time: true
+    snapshot_dir: "/tmp"
+    alert_hold_duration_sec: 4.0
+
+    # Base Station Home Pose
+    home_x: 0.0
+    home_y: 0.0
+    home_yaw: 0.0
+
+    # Detection & Control Thresholds
+    min_intruder_area: 450
+    turn_kp: 0.003
+
+    # Waypoints in format [x1, y1, yaw1, x2, y2, yaw2, ...]
+    # Configured for standard 10x10m warehouse depot corridors
+    waypoints: [
+      2.0,  1.5,  0.0,    # WP1: East Shelf Corridor
+      2.0, -1.5, -1.57,   # WP2: South Pallet Area
+     -1.5, -1.5,  3.14,   # WP3: West Staging Aisle
+     -1.5,  1.5,  1.57    # WP4: North Inspection Lane
+    ]

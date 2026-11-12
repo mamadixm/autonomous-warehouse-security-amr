@@ -1,0 +1,36 @@
+patrol_interceptor_node:
+  ros__parameters:
+    use_sim_time: true
+
+    # Shift Hours & Restricted Time Policy
+    authorized_shift_start_hour: 8
+    authorized_shift_end_hour: 18
+    force_after_hours_mode: true    # If true, all non-badged detections are treated as restricted-hours intruders
+
+    # Virtual RFID Whitelist
+    virtual_rfid_topic: "/security/authorized_beacon"
+    rfid_timeout_sec: 5.0           # Seconds an authorized RFID ping suppresses alerts
+
+    # HSV Color Detection Ranges
+    # Authorized Personnel: High-Vis Green/Cyan Security Vest (H: 35-85)
+    authorized_vest_hsv_lower: [35, 70, 70]
+    authorized_vest_hsv_upper: [85, 255, 255]
+
+    # Unauthorized Intruder: Hazard Red (H: 0-10 and 170-180)
+    unauthorized_red_lower1: [0, 100, 50]
+    unauthorized_red_upper1: [10, 255, 255]
+    unauthorized_red_lower2: [170, 100, 50]
+    unauthorized_red_upper2: [180, 255, 255]
+
+    # Authorized Security Personnel ArUco Badge IDs (DICT_4X4_50)
+    authorized_aruco_ids: [0, 1, 2, 42, 100]
+
+    # Vision & Anomaly Detection Tuning
+    min_detection_area: 400
+    confidence_threshold: 0.60
+    turn_kp: 0.003
+    alert_hold_duration_sec: 4.0
+
+    # Incident Storage & Snapshot Paths
+    db_path: "/home/mmdixm/amr_project_ws/data/security_incidents.db"
+    snapshot_dir: "/home/mmdixm/amr_project_ws/data/snapshots"
