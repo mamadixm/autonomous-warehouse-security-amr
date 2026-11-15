@@ -29,7 +29,7 @@ def generate_launch_description():
     )
     declare_port = DeclareLaunchArgument(
         'port',
-        default_value='8000',
+        default_value='8080',
         description='Command Center Web Dashboard HTTP/WebSocket port'
     )
     declare_rviz = DeclareLaunchArgument(
