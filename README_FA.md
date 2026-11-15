@@ -64,7 +64,7 @@
 ```bash
 cd ~
 git clone https://github.com/mamadixm/autonomous-warehouse-security-amr.git amr_project_ws
-cd ~/amr_project_ws
+cd ~/Desktop/amr_security_ws
 ```
 
 ### ۲. نصب پکیج‌ها و وابستگی‌های سیستمی
@@ -109,7 +109,7 @@ colcon build --symlink-install
 pkill -9 -f "gz sim|ros2|auto_explorer|command_center"
 
 source /opt/ros/jazzy/setup.bash
-source ~/amr_project_ws/install/setup.bash
+source ~/Desktop/amr_security_ws/install/setup.bash
 
 # حالت بهینه و کم‌مصرف (بدون درگیر کردن گرافیک، مناسب هر سیستمی)
 ros2 launch amr_command_center full_demo.launch.py headless:=true rviz:=false
@@ -131,7 +131,7 @@ ros2 launch amr_command_center full_demo.launch.py headless:=true rviz:=false
 ```bash
 # ترمینال ۱: اجرای ناوبری و اکتشاف خودکار
 source /opt/ros/jazzy/setup.bash
-source ~/amr_project_ws/install/setup.bash
+source ~/Desktop/amr_security_ws/install/setup.bash
 ros2 launch amr_navigation auto_mapping.launch.py
 ```
 *ربات شروع به چرخش و حرکت در تمام فضاهای خالی کرده، نقشه را در `src/amr_navigation/maps/warehouse_map` ذخیره می‌کند و به نقطه (0,0) بازمی‌گردد.*
@@ -140,12 +140,12 @@ ros2 launch amr_navigation auto_mapping.launch.py
 ```bash
 # ترمینال ۱: اجرای شبیه‌ساز انبار
 source /opt/ros/jazzy/setup.bash
-source ~/amr_project_ws/install/setup.bash
+source ~/Desktop/amr_security_ws/install/setup.bash
 ros2 launch amr_gazebo warehouse.launch.py
 
 # ترمینال ۲: اجرای مرکز فرماندهی و گشت‌زنی هوشمند
 source /opt/ros/jazzy/setup.bash
-source ~/amr_project_ws/install/setup.bash
+source ~/Desktop/amr_security_ws/install/setup.bash
 ros2 launch amr_command_center security_command_center.launch.py
 ```
 
@@ -157,27 +157,27 @@ ros2 launch amr_command_center security_command_center.launch.py
 
 1. **اسپاون نفوذگر غیرمجاز در برابر دید ربات (سیلندر قرمز):**
    ```bash
-   ~/amr_project_ws/src/amr_gazebo/scripts/spawn_intruder.sh 1.5 0.0 0.35
+   ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_intruder.sh 1.5 0.0 0.35
    ```
    *ربات نفوذگر را می‌بیند، آژیر هشدار در وب به صدا درمی‌آید، واقعه در SQLite ثبت و عکس صحنه ذخیره می‌شود.*
 
 2. **تست دوربین عقب (چرخش ۱۸۰ درجه ربات):**
    نفوذگر را پشت سر ربات ظاهر کنید:
    ```bash
-   ~/amr_project_ws/src/amr_gazebo/scripts/spawn_intruder.sh -1.5 0.0 0.35
+   ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_intruder.sh -1.5 0.0 0.35
    ```
    *ربات از طریق دوربین عقب نفوذگر را شناسایی کرده و در جا ۱۸۰ درجه می‌چرخد تا با سنسورهای جلویی با او مقابله کند.*
 
 3. **اسپاون نگهبان مجاز (دارای جلیقه سبز و کد RFID معتبر):**
    ```bash
-   ~/amr_project_ws/src/amr_gazebo/scripts/spawn_guard.sh 1.5 0.0 0.35
+   ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_guard.sh 1.5 0.0 0.35
    ```
    *ربات کارت و جلیقه را اعتبارسنجی کرده، پیام خوش‌آمدگویی ثبت می‌کند و بدون ایجاد آلارم به گشت ادامه می‌دهد.*
 
 4. **پاک‌سازی مدل‌های تست از محیط انبار:**
    ```bash
-   ~/amr_project_ws/src/amr_gazebo/scripts/spawn_intruder.sh delete
-   ~/amr_project_ws/src/amr_gazebo/scripts/spawn_guard.sh delete
+   ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_intruder.sh delete
+   ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_guard.sh delete
    ```
 
 ---

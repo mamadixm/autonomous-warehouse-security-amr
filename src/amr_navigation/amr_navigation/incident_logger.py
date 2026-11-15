@@ -16,8 +16,8 @@ import numpy as np
 class IncidentLogger:
     def __init__(
         self,
-        db_path: str = "/home/mmdixm/amr_project_ws/data/security_incidents.db",
-        snapshot_dir: str = "/home/mmdixm/amr_project_ws/data/snapshots"
+        db_path: str = "/home/mmdixm/Desktop/amr_security_ws/data/security_incidents.db",
+        snapshot_dir: str = "/home/mmdixm/Desktop/amr_security_ws/data/snapshots"
     ):
         self.db_path = os.path.expanduser(db_path)
         self.snapshot_dir = os.path.expanduser(snapshot_dir)

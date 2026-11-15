@@ -70,7 +70,7 @@ def generate_launch_description():
     )
     declare_intruder_delay = DeclareLaunchArgument(
         'intruder_delay_sec',
-        default_value='30.0',
+        default_value='12.0',
         description='Simulation-time countdown seconds after entering PATROL before spawning intruder'
     )
     declare_spawn_x = DeclareLaunchArgument(
@@ -118,8 +118,8 @@ def generate_launch_description():
             'host': '0.0.0.0',
             'map_yaml': map_yaml,
             'map_pgm': default_map_pgm,
-            'db_path': '/home/mmdixm/amr_project_ws/data/security_incidents.db',
-            'snapshot_dir': '/home/mmdixm/amr_project_ws/data/snapshots'
+            'db_path': '/home/mmdixm/Desktop/amr_security_ws/data/security_incidents.db',
+            'snapshot_dir': '/home/mmdixm/Desktop/amr_security_ws/data/snapshots'
         }]
     )
 

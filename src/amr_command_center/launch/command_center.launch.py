@@ -37,10 +37,10 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'port': port,
             'host': host,
-            'db_path': '/home/mmdixm/amr_project_ws/data/security_incidents.db',
-            'snapshot_dir': '/home/mmdixm/amr_project_ws/data/snapshots',
-            'map_yaml': '/home/mmdixm/amr_project_ws/src/amr_navigation/maps/warehouse_map.yaml',
-            'map_pgm': '/home/mmdixm/amr_project_ws/src/amr_navigation/maps/warehouse_map.pgm',
+            'db_path': '/home/mmdixm/Desktop/amr_security_ws/data/security_incidents.db',
+            'snapshot_dir': '/home/mmdixm/Desktop/amr_security_ws/data/snapshots',
+            'map_yaml': '/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map.yaml',
+            'map_pgm': '/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map.pgm',
         }]
     )
 

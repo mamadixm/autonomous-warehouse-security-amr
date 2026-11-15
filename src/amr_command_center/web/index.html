@@ -540,7 +540,18 @@
       <!-- Mission Stage Badge -->
       <div class="stat-badge">
         <span class="stat-label">Mission:</span>
-        <span class="pill-state" id="missionStage" style="background:#1e3a8a;color:#93c5fd;border:1px solid #3b82f6;">STAGE 1: INIT</span>
+        <span class="pill-state" id="missionStage" style="background:#1e3a8a;color:#93c5fd;border:1px solid #3b82f6;">STAGE 1: MAPPING</span>
+      </div>
+
+      <!-- SLAM Progress Bar Badge -->
+      <div class="stat-badge" id="slamBadge">
+        <span class="stat-label">SLAM:</span>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <div style="width:65px; height:12px; background:#374151; border-radius:3px; overflow:hidden; border:1px solid #4b5563;">
+            <div id="slamBarFill" style="height:100%; width:0%; background:linear-gradient(90deg, #06b6d4, #10b981); transition:width 0.4s ease;"></div>
+          </div>
+          <span class="stat-value" id="slamProgressText" style="color:#06b6d4;">0.0%</span>
+        </div>
       </div>
 
       <!-- Security Mode -->
@@ -630,9 +641,24 @@
 
       <!-- Interactive Warehouse Map Canvas -->
       <div class="panel">
-        <div class="panel-header">
-          <span class="panel-title">🗺️ Interactive Facility Map &amp; Click-to-Navigate</span>
-          <span style="font-size: 0.75rem; color: var(--accent-cyan);">Click anywhere to dispatch AMR</span>
+        <div class="panel-header" style="flex-wrap: wrap; gap: 10px;">
+          <div style="display:flex; align-items:center; gap: 10px;">
+            <span class="panel-title">🗺️ Interactive Facility Map &amp; Click-to-Navigate</span>
+            <span style="font-size: 0.75rem; color: var(--accent-cyan);">(Click to dispatch AMR)</span>
+          </div>
+          <div style="display:flex; align-items:center; gap: 12px;">
+            <!-- Live SLAM Header Progress -->
+            <div style="display:flex; align-items:center; gap: 6px; background: rgba(0,0,0,0.35); padding: 4px 10px; border-radius: 4px; border: 1px solid #374151;">
+              <span id="mapSlamStatus" style="font-size: 0.75rem; color: #10b981; font-weight: 700; font-family: monospace;">SLAM: 0.0%</span>
+              <div style="width: 70px; height: 8px; background: #374151; border-radius: 4px; overflow: hidden;">
+                <div id="mapSlamFill" style="height:100%; width:0%; background:#10b981; transition: width 0.4s ease;"></div>
+              </div>
+            </div>
+            <!-- On-Demand Reset Map & Re-SLAM Button -->
+            <button class="btn" id="btnResetMap" style="background:#dc2626; color:#ffffff; border:1px solid #ef4444; padding:5px 12px; font-size:0.75rem; font-weight:700; border-radius:6px; cursor:pointer; display:flex; align-items:center; gap:5px; transition: background 0.2s;" onmouseover="this.style.background='#b91c1c'" onmouseout="this.style.background='#dc2626'">
+              🔄 Reset Map &amp; Re-SLAM
+            </button>
+          </div>
         </div>
         <div class="panel-body">
           <div class="map-container">
@@ -787,24 +813,17 @@
             updateTelemetry(payload.data);
           } else if (payload.event === 'alert') {
             triggerAlertBanner(payload.data);
+          } else if (payload.event === 'explore_progress') {
+            const p = payload.data.progress !== undefined ? payload.data.progress : 0.0;
+            const st = payload.data.stage || '';
+            updateSlamProgress(p, st);
+          } else if (payload.event === 'map_update') {
+            loadMap();
+          } else if (payload.event === 'map_reset') {
+            updateSlamProgress(0.0, "STAGE 1: MAPPING");
+            loadMap();
           } else if (payload.event === 'mission_stage') {
-            const mStage = document.getElementById('missionStage');
-            if (mStage) {
-              mStage.textContent = payload.data.replace(/_/g, ' ');
-              if (payload.data.includes('COMPLETE') || payload.data.includes('SUCCESS')) {
-                mStage.style.background = '#064e3b';
-                mStage.style.color = '#6ee7b7';
-                mStage.style.border = '1px solid #10b981';
-              } else if (payload.data.includes('ALERT') || payload.data.includes('INTRUDER')) {
-                mStage.style.background = '#7f1d1d';
-                mStage.style.color = '#fca5a5';
-                mStage.style.border = '1px solid #ef4444';
-              } else if (payload.data.includes('STAGE_2') || payload.data.includes('MAPPING')) {
-                mStage.style.background = '#78350f';
-                mStage.style.color = '#fde68a';
-                mStage.style.border = '1px solid #f59e0b';
-              }
-            }
+            updateMissionStage(payload.data);
           }
         } catch (e) {
           console.error("WS Parse error:", e);
@@ -825,11 +844,28 @@
 
     function sendCommand(actionPayload) {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: "operator_command",
-          payload: actionPayload
-        }));
+        try {
+          ws.send(JSON.stringify({
+            type: "operator_command",
+            payload: actionPayload
+          }));
+          console.log("Operator command sent via WebSocket:", actionPayload);
+          return;
+        } catch (e) {
+          console.warn("WebSocket send error, falling back to HTTP:", e);
+        }
       }
+
+      // Fallback to HTTP REST only if WebSocket is not open
+      fetch("/api/operator/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(actionPayload)
+      }).then(r => r.json()).then(data => {
+        console.log("Operator command acknowledged via HTTP:", data);
+      }).catch(err => {
+        console.error("Failed to send operator command:", err);
+      });
     }
 
     function sendTeleop(linear_x, angular_z) {
@@ -839,6 +875,53 @@
           linear_x: linear_x,
           angular_z: angular_z
         }));
+      }
+    }
+
+    let currentMissionStage = "STAGE 1: MAPPING";
+
+    function updateSlamProgress(progress, stage) {
+      const clamped = Math.max(0, Math.min(100, parseFloat(progress) || 0));
+      const text = clamped.toFixed(1) + '%';
+
+      const slamText = document.getElementById('slamProgressText');
+      const slamFill = document.getElementById('slamBarFill');
+      const mapFill = document.getElementById('mapSlamFill');
+      const mapStatus = document.getElementById('mapSlamStatus');
+
+      if (slamText) slamText.textContent = text;
+      if (slamFill) slamFill.style.width = clamped + '%';
+      if (mapFill) mapFill.style.width = clamped + '%';
+      if (mapStatus) mapStatus.textContent = `SLAM: ${text}`;
+
+      if (stage) {
+        updateMissionStage(stage);
+      }
+    }
+
+    function updateMissionStage(stage) {
+      if (!stage) return;
+      currentMissionStage = stage.replace(/_/g, ' ').toUpperCase();
+      const mStage = document.getElementById('missionStage');
+      if (!mStage) return;
+
+      mStage.textContent = currentMissionStage;
+      if (currentMissionStage.includes('RETURNING TO BASE') || currentMissionStage.includes('RETURN')) {
+        mStage.style.background = '#1e3a8a';
+        mStage.style.color = '#bfdbfe';
+        mStage.style.border = '1px solid #3b82f6';
+      } else if (currentMissionStage.includes('STAGE 2: PATROL') || currentMissionStage.includes('PATROL') || currentMissionStage.includes('COMPLETE') || currentMissionStage.includes('SUCCESS')) {
+        mStage.style.background = '#064e3b';
+        mStage.style.color = '#6ee7b7';
+        mStage.style.border = '1px solid #10b981';
+      } else if (currentMissionStage.includes('STAGE 1: MAPPING') || currentMissionStage.includes('MAPPING')) {
+        mStage.style.background = '#78350f';
+        mStage.style.color = '#fde68a';
+        mStage.style.border = '1px solid #f59e0b';
+      } else if (currentMissionStage.includes('ALERT') || currentMissionStage.includes('INTRUDER')) {
+        mStage.style.background = '#7f1d1d';
+        mStage.style.color = '#fca5a5';
+        mStage.style.border = '1px solid #ef4444';
       }
     }
 
@@ -924,7 +1007,8 @@
 
     async function loadMap() {
       try {
-        const metaRes = await fetch('/api/map/metadata');
+        const metaRes = await fetch(`/api/map/metadata?t=${Date.now()}`);
+        if (!metaRes.ok) return;
         mapMetadata = await metaRes.json();
         document.getElementById('mapRes').textContent = `${mapMetadata.resolution}m/px`;
         document.getElementById('mapOrigin').textContent = `[${mapMetadata.origin[0].toFixed(2)}, ${mapMetadata.origin[1].toFixed(2)}]`;
@@ -934,7 +1018,7 @@
           mapCanvas.height = mapImg.height;
           drawMap();
         };
-        mapImg.src = '/api/map/image';
+        mapImg.src = `/api/map/image?t=${Date.now()}`;
       } catch (e) {
         console.error("Map loading error:", e);
       }
@@ -1011,9 +1095,38 @@
 
         ctx.restore();
       }
+
+      // Draw clicked target marker if set
+      if (targetMarker) {
+        const pt = worldToPixel(targetMarker.wx, targetMarker.wy);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pt.px, pt.py, 8, 0, 2 * Math.PI);
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(pt.px, pt.py, 3, 0, 2 * Math.PI);
+        ctx.fillStyle = '#06b6d4';
+        ctx.fill();
+
+        // Crosshairs
+        ctx.beginPath();
+        ctx.moveTo(pt.px - 12, pt.py);
+        ctx.lineTo(pt.px + 12, pt.py);
+        ctx.moveTo(pt.px, pt.py - 12);
+        ctx.lineTo(pt.px, pt.py + 12);
+        ctx.strokeStyle = '#06b6d4';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+      }
     }
 
     // Click-to-Navigate
+    let targetMarker = null;
+
     mapCanvas.addEventListener('click', (e) => {
       const rect = mapCanvas.getBoundingClientRect();
       const scaleX = mapCanvas.width / rect.width;
@@ -1022,7 +1135,13 @@
       const py = (e.clientY - rect.top) * scaleY;
 
       const world = pixelToWorld(px, py);
-      document.getElementById('clickCoords').textContent = `Target: (${world.wx.toFixed(2)}, ${world.wy.toFixed(2)})`;
+      targetMarker = { wx: world.wx, wy: world.wy };
+
+      const clickCoords = document.getElementById('clickCoords');
+      if (clickCoords) {
+        clickCoords.textContent = `Target: (${world.wx.toFixed(2)}, ${world.wy.toFixed(2)}) - DISPATCHED`;
+        clickCoords.style.color = '#06b6d4';
+      }
 
       // Dispatch AMR to clicked target pose
       sendCommand({
@@ -1031,16 +1150,28 @@
         y: world.wy,
         yaw: 0.0
       });
+
+      drawMap();
     });
 
     // =========================================================================
     // Action Buttons Dispatch
     // =========================================================================
     document.getElementById('btnResumePatrol').onclick = () => {
+      const clickCoords = document.getElementById('clickCoords');
+      if (clickCoords) {
+        clickCoords.textContent = "Action: AUTO PATROL - DISPATCHED";
+        clickCoords.style.color = '#10b981';
+      }
       sendCommand({ action: "RESUME_PATROL" });
     };
 
     document.getElementById('btnReturnToBase').onclick = () => {
+      const clickCoords = document.getElementById('clickCoords');
+      if (clickCoords) {
+        clickCoords.textContent = "Action: RETURN TO BASE - DISPATCHED";
+        clickCoords.style.color = '#3b82f6';
+      }
       sendCommand({ action: "RETURN_TO_BASE" });
     };
 
@@ -1051,6 +1182,36 @@
     document.getElementById('btnMarkAuthorized').onclick = () => {
       sendCommand({ action: "MARK_AUTHORIZED" });
     };
+
+    // On-Demand Reset Map & Re-SLAM
+    const btnResetMap = document.getElementById('btnResetMap');
+    if (btnResetMap) {
+      btnResetMap.onclick = async () => {
+        const ok = confirm("⚠️ Are you sure you want to delete the warehouse map, reset SLAM progress to 0%, and restart autonomous Phase 1 mapping from (0, 0)?");
+        if (!ok) return;
+
+        try {
+          const res = await fetch('/api/map/reset', { method: 'POST' });
+          const data = await res.json();
+          if (data.success) {
+            updateSlamProgress(0.0, "STAGE 1: MAPPING");
+            loadMap();
+          } else {
+            alert("Map reset failed: " + (data.detail || data.message));
+          }
+        } catch (err) {
+          console.error("Error invoking reset API:", err);
+          sendCommand({ action: "RESET_MAP" });
+        }
+      };
+    }
+
+    // Periodic live map refresh during mapping
+    setInterval(() => {
+      if (currentMissionStage && (currentMissionStage.includes('MAPPING') || currentMissionStage.includes('INIT'))) {
+        loadMap();
+      }
+    }, 3000);
 
     // =========================================================================
     // Manual Teleoperation Pad & Keyboard Controls

@@ -32,3 +32,4 @@ data/snapshots/*.jpg
 data/snapshots/*.png
 data/*.db
 !data/snapshots/.gitkeep
+*.mapping_complete

@@ -17,8 +17,10 @@ Features:
 import os
 import math
 import time
+import json
 import shutil
 import subprocess
+import cv2
 import numpy as np
 import scipy.ndimage
 
@@ -38,6 +40,44 @@ try:
     from slam_toolbox.srv import SaveMap
 except ImportError:
     SaveMap = None
+
+
+def save_occupancy_grid_to_disk(map_msg: OccupancyGrid, prefix: str) -> bool:
+    """Save an OccupancyGrid directly to PGM and YAML formats in milliseconds."""
+    if map_msg is None:
+        return False
+    try:
+        w = map_msg.info.width
+        h = map_msg.info.height
+        res = map_msg.info.resolution
+        ox = map_msg.info.origin.position.x
+        oy = map_msg.info.origin.position.y
+
+        grid = np.array(map_msg.data, dtype=np.int8).reshape((h, w))
+        img = np.full((h, w), 205, dtype=np.uint8)
+        img[grid == 0] = 254
+        img[grid > 50] = 0
+        img = np.flipud(img)
+
+        pgm_path = prefix + ".pgm"
+        yaml_path = prefix + ".yaml"
+
+        cv2.imwrite(pgm_path, img)
+
+        yaml_content = f"""image: {os.path.basename(pgm_path)}
+mode: trinary
+resolution: {res:.6f}
+origin: [{ox:.6f}, {oy:.6f}, 0.000000]
+negate: 0
+occupied_thresh: 0.65
+free_thresh: 0.196
+"""
+        with open(yaml_path, "w") as f:
+            f.write(yaml_content)
+        return True
+    except Exception as e:
+        print(f"Direct map save exception: {e}")
+        return False
 
 
 def yaw_to_quaternion(yaw: float) -> Quaternion:
@@ -130,13 +170,25 @@ class FrontierExplorerFSM(BasicNavigator):
         # Publishers & Subscribers
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.status_pub = self.create_publisher(String, '/explore/status', 10)
+        self.progress_pub = self.create_publisher(String, '/explore/progress', 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, sensor_qos)
         self.map_sub = self.create_subscription(OccupancyGrid, '/map', self.map_callback, map_qos)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
         self.trigger_sub = self.create_subscription(Bool, '/explore/enable', self.trigger_topic_callback, 10)
+        self.operator_sub = self.create_subscription(String, '/security/operator_command', self.operator_command_callback, 10)
         self.enable_srv = self.create_service(SetBool, '/explore/enable', self.trigger_service_callback)
 
+        # SLAM Progress & Smart Plateau Tracking
+        self.current_progress = 0.0
+        self.no_frontier_start_time = None
+        self.last_growth_time = time.time()
+        self.last_known_free = 0
+        self.frontiers_visited = 0
+        self.manual_override_active = False
+        self.manual_target_pose = None
+
         self.publish_status("INIT")
+        self.publish_progress(0.0, "STAGE 1: MAPPING")
         self.info("Frontier Explorer Node Initialized.")
 
     def publish_status(self, text: str):
@@ -144,9 +196,71 @@ class FrontierExplorerFSM(BasicNavigator):
         msg.data = str(text)
         self.status_pub.publish(msg)
 
+    def publish_progress(self, progress: float, stage: str):
+        msg = String()
+        clamped = float(np.clip(progress, 0.0, 100.0))
+        msg.data = json.dumps({
+            "progress": round(clamped, 1),
+            "stage": str(stage)
+        })
+        self.progress_pub.publish(msg)
+
+    # --------------------------------------------------------------------------
+    # Safe Nav2 Wrappers
+    # --------------------------------------------------------------------------
+    def safe_cancel_task(self):
+        try:
+            if hasattr(self, 'goal_handle') and self.goal_handle:
+                try:
+                    self.goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                self.goal_handle = None
+            self.result_future = None
+        except Exception as e:
+            self.warn(f"[auto_explorer] cancelTask exception: {e}")
+
+    def safe_go_to_pose(self, pose: PoseStamped) -> bool:
+        try:
+            self.goToPose(pose)
+            return True
+        except Exception as e:
+            self.error(f"[auto_explorer] goToPose exception: {e}")
+            return False
+
+    def safe_is_task_complete(self) -> bool:
+        try:
+            return self.isTaskComplete()
+        except Exception:
+            return True
+
     # --------------------------------------------------------------------------
     # Callbacks & Triggers
     # --------------------------------------------------------------------------
+    def operator_command_callback(self, msg: String):
+        """Handle remote dispatch commands from the Command Center during Stage 1."""
+        try:
+            cmd = json.loads(msg.data)
+            action = cmd.get("action", "").upper().strip()
+            self.info(f"[auto_explorer] Received operator command: {action}")
+
+            if action == "RETURN_TO_BASE":
+                self.info("[auto_explorer] Operator commanded RETURN_TO_BASE. Queuing completion & docking...")
+                self.request_return_home = True
+
+            elif action == "RESUME_PATROL":
+                self.info("[auto_explorer] Operator commanded RESUME_PATROL. Queuing completion & patrol transition...")
+                self.request_resume_patrol = True
+
+            elif action == "GOTO_POSE":
+                gx = float(cmd.get("x", 0.0))
+                gy = float(cmd.get("y", 0.0))
+                gyaw = float(cmd.get("yaw", 0.0))
+                self.info(f"[auto_explorer] Operator commanded GOTO_POSE ({gx:.2f}, {gy:.2f})")
+                self.manual_override_requested = (gx, gy, gyaw)
+        except Exception as e:
+            self.error(f"[auto_explorer] Failed to process operator command: {e}")
+
     def scan_callback(self, msg: LaserScan):
         self.latest_scan = msg
 
@@ -175,7 +289,7 @@ class FrontierExplorerFSM(BasicNavigator):
         self.is_enabled = enable
         if not self.is_enabled:
             if self.state == self.STATE_NAVIGATING:
-                self.cancelTask()
+                self.safe_cancel_task()
             self.stop_robot()
             self.state = self.STATE_INIT
             self.info(f"Exploration PAUSED ({reason}).")
@@ -224,7 +338,7 @@ class FrontierExplorerFSM(BasicNavigator):
     def wait_for_nav2_slam(self) -> bool:
         """Check if Nav2 navigation server is running. Returns True if available, False otherwise."""
         self.info("Probing Nav2 action server ('navigate_to_pose')...")
-        server_ready = self.nav_to_pose_client.wait_for_server(timeout_sec=8.0)
+        server_ready = self.nav_to_pose_client.wait_for_server(timeout_sec=12.0)
         if not server_ready:
             self.warn(
                 "\n" + "=" * 78 + "\n"
@@ -234,36 +348,36 @@ class FrontierExplorerFSM(BasicNavigator):
             )
             return False
 
-        self.info("Nav2 action server detected. Activating SLAM navigation...")
-        try:
-            self.waitUntilNav2Active(navigator='bt_navigator', localizer='robot_localization')
-            self.info("Nav2 core navigation nodes are active!")
-        except Exception as e:
-            self.warn(f"Lifecycle wait exception: {e}")
-
-        self.info("Waiting for TF map -> base_footprint from slam_toolbox...")
+        self.info("Nav2 action server detected. Waiting for TF map -> base_footprint from slam_toolbox...")
         start_t = time.time()
-        while rclpy.ok() and (time.time() - start_t < 15.0):
+        while rclpy.ok() and (time.time() - start_t < 20.0):
             try:
-                if self.tf_buffer.can_transform('map', 'base_footprint', rclpy.time.Time(), timeout=Duration(seconds=1.0)):
-                    self.info("TF map -> base_footprint is fully resolved!")
+                if self.tf_buffer.can_transform('map', 'base_footprint', rclpy.time.Time(), timeout=Duration(seconds=0.8)):
+                    self.info("TF map -> base_footprint is fully resolved! SLAM navigation ready.")
                     return True
             except Exception:
                 pass
             rclpy.spin_once(self, timeout_sec=0.5)
 
+        self.info("TF map -> base_footprint wait finished. Proceeding with SLAM navigation.")
         return True
 
     def check_initial_spin(self):
         """Execute a guaranteed 360-degree velocity spin to seed SLAM with full 360° LiDAR data."""
         self.info("Executing 360-degree velocity spin to seed SLAM with warehouse geometry...")
+        self.publish_progress(5.0, "STAGE 1: MAPPING")
         twist = Twist()
         twist.angular.z = 0.65
         start_t = time.time()
         while time.time() - start_t < 9.5 and rclpy.ok():
+            elapsed = time.time() - start_t
+            spin_prog = 5.0 + (elapsed / 9.5) * 13.0
+            self.publish_progress(spin_prog, "STAGE 1: MAPPING")
             self.cmd_pub.publish(twist)
             rclpy.spin_once(self, timeout_sec=0.1)
         self.stop_robot()
+        self.current_progress = 18.0
+        self.publish_progress(18.0, "STAGE 1: MAPPING")
         self.info("Initial 360° spin complete. SLAM seed map established.")
 
     # --------------------------------------------------------------------------
@@ -310,6 +424,10 @@ class FrontierExplorerFSM(BasicNavigator):
 
             wx = ox + (c_safe + 0.5) * res
             wy = oy + (r_safe + 0.5) * res
+
+            # Bounding box filter: warehouse interior perimeter bounds in map frame
+            if not (-10.2 <= wx <= 10.2 and -15.8 <= wy <= 9.2):
+                continue
 
             if any(math.hypot(wx - bx, wy - by) < self.min_goal_dist for (bx, by) in self.blacklisted_goals):
                 continue
@@ -358,27 +476,34 @@ class FrontierExplorerFSM(BasicNavigator):
     # Finish, Save Map & Return to Base
     # --------------------------------------------------------------------------
     def auto_finish_and_return_home(self, use_nav2: bool = True):
-        """Save the completed map and navigate back to (0, 0, 0)."""
+        """Save the completed map, clamp progress to 100%, and navigate back to (0, 0, 0)."""
+        self.current_progress = 100.0
+        self.publish_progress(100.0, "STAGE 1: MAPPING")
         self.publish_status("SAVING_MAP")
         self.info("=" * 78)
-        self.info("[auto_explorer] ALL FRONTIERS EXPLORED: Finalizing mapping...")
+        self.info("[auto_explorer] ALL AISLES / FRONTIERS EXPLORED: Finalizing mapping...")
         self.info("=" * 78)
 
         # 1. Save Map
-        map_dir = "/home/mmdixm/amr_project_ws/src/amr_navigation/maps"
+        map_dir = "/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps"
         os.makedirs(map_dir, exist_ok=True)
         map_prefix = os.path.join(map_dir, "warehouse_map")
         self.info(f"[auto_explorer] Step 1: Saving warehouse map to {map_prefix}...")
 
         saved_ok = False
-        if SaveMap is not None:
+        if self.latest_map is not None:
+            saved_ok = save_occupancy_grid_to_disk(self.latest_map, map_prefix)
+            if saved_ok:
+                self.info("[auto_explorer] Map saved directly from memory OccupancyGrid in milliseconds!")
+
+        if not saved_ok and SaveMap is not None:
             try:
                 save_client = self.create_client(SaveMap, '/slam_toolbox/save_map')
-                if save_client.wait_for_service(timeout_sec=3.0):
+                if save_client.wait_for_service(timeout_sec=2.0):
                     req = SaveMap.Request()
                     req.name.data = map_prefix
                     future = save_client.call_async(req)
-                    rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+                    rclpy.spin_until_future_complete(self, future, timeout_sec=4.0)
                     if future.done() and future.result() is not None:
                         if future.result().result == 0:
                             self.info("[auto_explorer] Map successfully saved via slam_toolbox service!")
@@ -386,72 +511,116 @@ class FrontierExplorerFSM(BasicNavigator):
             except Exception as e:
                 self.warn(f"[auto_explorer] slam_toolbox service exception: {e}")
 
-        if not saved_ok or not os.path.exists(map_prefix + ".yaml"):
-            cmd = [
-                "ros2", "run", "nav2_map_server", "map_saver_cli",
-                "-f", map_prefix,
-                "--ros-args", "-p", "use_sim_time:=true",
-                "-p", "map_subscribe_transient_local:=true"
-            ]
-            try:
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=25.0, text=True)
-                self.info(f"[auto_explorer] map_saver_cli output:\n{res.stdout}")
-            except Exception as e:
-                self.error(f"[auto_explorer] Error during map saving: {e}")
-
-        install_maps_dir = "/home/mmdixm/amr_project_ws/install/amr_navigation/share/amr_navigation/maps"
+        install_maps_dir = "/home/mmdixm/Desktop/amr_security_ws/install/amr_navigation/share/amr_navigation/maps"
         os.makedirs(install_maps_dir, exist_ok=True)
         for ext in [".yaml", ".pgm"]:
             src_f = map_prefix + ext
             dst_f = os.path.join(install_maps_dir, "warehouse_map" + ext)
             if os.path.exists(src_f):
-                shutil.copy2(src_f, dst_f)
-                self.info(f"[auto_explorer] Map synced to install share: {install_maps_dir}")
+                try:
+                    if not (os.path.exists(dst_f) and os.path.samefile(src_f, dst_f)):
+                        shutil.copy2(src_f, dst_f)
+                        self.info(f"[auto_explorer] Map synced to install share: {install_maps_dir}")
+                except Exception:
+                    pass
 
+        # 2. Return to Base (0, 0, 0)
+        self.publish_progress(100.0, "RETURNING TO BASE")
+        self.publish_status("RETURNING_HOME")
+        reached_origin = False
+        self.stop_robot()
+        self.safe_cancel_task()
+        time.sleep(1.0)
+
+        if use_nav2:
+            self.info("[auto_explorer] Step 2: Navigating back to home base (0.0, 0.0, 0.0) via Nav2...")
+            home_pose = self.create_pose_stamped(0.0, 0.0, 0.0)
+            self.safe_go_to_pose(home_pose)
+
+            nav_start = time.time()
+            while rclpy.ok() and (time.time() - nav_start < 55.0):
+                rclpy.spin_once(self, timeout_sec=0.2)
+                self.publish_progress(100.0, "RETURNING TO BASE")
+                pose = self.get_robot_pose()
+                rx = pose[0] if pose else self.current_x
+                ry = pose[1] if pose else self.current_y
+                dist_to_base = math.hypot(rx, ry)
+                if dist_to_base <= 0.35:
+                    self.info(f"[auto_explorer] Within base threshold ({dist_to_base:.3f}m <= 0.35m). Docked!")
+                    reached_origin = True
+                    self.safe_cancel_task()
+                    break
+                if self.safe_is_task_complete():
+                    if dist_to_base <= 0.35:
+                        reached_origin = True
+                    break
+
+        # Fallback direct odometry/velocity steering if not yet within 0.35m of (0, 0)
+        pose = self.get_robot_pose()
+        rx = pose[0] if pose else self.current_x
+        ry = pose[1] if pose else self.current_y
+        dist_to_base = math.hypot(rx, ry)
+
+        if not reached_origin and dist_to_base > 0.35:
+            self.info(f"[auto_explorer] Engaging direct fallback drive to base (current dist: {dist_to_base:.2f}m)...")
+            self.safe_cancel_task()
+            start_rtb = time.time()
+            while rclpy.ok() and (time.time() - start_rtb < 30.0):
+                rclpy.spin_once(self, timeout_sec=0.1)
+                self.publish_progress(100.0, "RETURNING TO BASE")
+                pose = self.get_robot_pose()
+                if pose is not None:
+                    rx, ry, ryaw = pose
+                else:
+                    rx, ry, ryaw = self.current_x, self.current_y, 0.0
+
+                dist = math.hypot(rx, ry)
+                if dist <= 0.35:
+                    self.info(f"[auto_explorer] Direct fallback reached base ({dist:.3f}m <= 0.35m).")
+                    reached_origin = True
+                    break
+
+                target_yaw = math.atan2(-ry, -rx)
+                yaw_diff = math.atan2(math.sin(target_yaw - ryaw), math.cos(target_yaw - ryaw))
+
+                twist = Twist()
+                if abs(yaw_diff) > 0.6:
+                    twist.linear.x = 0.05
+                    twist.angular.z = float(np.clip(1.5 * yaw_diff, -0.7, 0.7))
+                else:
+                    twist.linear.x = 0.25
+                    twist.angular.z = float(np.clip(1.2 * yaw_diff, -0.5, 0.5))
+
+                self.publish_cmd(twist)
+                time.sleep(0.05)
+
+        self.stop_robot()
+        time.sleep(1.0)
+        self.info(f"[auto_explorer] Return to base completed (docked: {reached_origin}).")
+
+        # 3. Create mapping complete markers ONLY after returning to base!
         try:
             marker_file = os.path.join(map_dir, ".mapping_complete")
             with open(marker_file, "w") as f:
                 f.write(f"COMPLETED at {time.time()}\n")
-        except Exception:
-            pass
-
-        # 2. Return to Base (0, 0, 0)
-        self.publish_status("RETURNING_HOME")
-        if use_nav2:
-            self.info("[auto_explorer] Step 2: Navigating back to home base (0.0, 0.0, 0.0)...")
-            home_pose = self.create_pose_stamped(0.0, 0.0, 0.0)
-            self.goToPose(home_pose)
-
-            nav_start = time.time()
-            while not self.isTaskComplete() and rclpy.ok() and (time.time() - nav_start < 25.0):
-                rclpy.spin_once(self, timeout_sec=0.2)
-
-            home_res = self.getResult()
-            self.info(f"[auto_explorer] Return to base finished with status: {home_res}")
-        else:
-            self.info("[auto_explorer] Step 2: Heading back to home origin (0.0, 0.0) via odometry...")
-            start_rtb = time.time()
-            while rclpy.ok() and (time.time() - start_rtb < 15.0):
-                rclpy.spin_once(self, timeout_sec=0.1)
-                dist = math.hypot(self.current_x, self.current_y)
-                if dist < 0.40:
-                    break
-                target_yaw = math.atan2(-self.current_y, -self.current_x)
-                twist = Twist()
-                twist.linear.x = 0.25
-                twist.angular.z = float(np.clip(1.2 * target_yaw, -0.7, 0.7))
-                self.publish_cmd(twist)
-            self.stop_robot()
-            self.info("[auto_explorer] Docked at origin (0.0, 0.0).")
+            install_marker = os.path.join(install_maps_dir, ".mapping_complete")
+            if not (os.path.exists(install_marker) and os.path.samefile(marker_file, install_marker)):
+                with open(install_marker, "w") as f:
+                    f.write(f"COMPLETED at {time.time()}\n")
+            self.info(f"[auto_explorer] Mapping complete marker created at {marker_file}")
+        except Exception as e:
+            self.warn(f"[auto_explorer] Error writing marker file: {e}")
 
         self.info("=" * 78)
-        self.info("Mapping complete. Map saved and robot returned to home base (0,0). Ready for new commands.")
+        self.info("Mapping complete. Map saved and robot returned to home base (0,0). Handoff to Patrol.")
         self.info("=" * 78)
         self.state = self.STATE_FINISHED
 
-        for _ in range(5):
+        # Clean handoff to Phase 2 Patrol
+        for _ in range(8):
+            self.publish_progress(100.0, "STAGE 2: PATROL")
             self.publish_status("FINISHED")
-            time.sleep(0.1)
+            time.sleep(0.12)
 
     # --------------------------------------------------------------------------
     # Nav2 Frontier Exploration Loop
@@ -461,11 +630,40 @@ class FrontierExplorerFSM(BasicNavigator):
         self.check_initial_spin()
         self.state = self.STATE_FIND_FRONTIER
         self.publish_status("MAPPING")
+        self.publish_progress(self.current_progress, "STAGE 1: MAPPING")
         start_explore_time = time.time()
-        min_mapping_duration = 45.0  # seconds minimum exploration time
+        self.last_growth_time = time.time()
+        self.no_frontier_start_time = None
+        last_progress_time = time.time()
+        last_map_check_time = time.time()
 
         while rclpy.ok() and self.state != self.STATE_FINISHED:
             rclpy.spin_once(self, timeout_sec=0.1)
+
+            # Check if operator requested Return to Base or Resume Patrol
+            if getattr(self, 'request_return_home', False) or getattr(self, 'request_resume_patrol', False):
+                self.request_return_home = False
+                self.request_resume_patrol = False
+                self.info("[auto_explorer] Processing operator completion request. Returning to base...")
+                self.current_progress = 100.0
+                self.publish_progress(100.0, "STAGE 1: MAPPING")
+                self.auto_finish_and_return_home(use_nav2=True)
+                break
+
+            # Check if operator requested GOTO_POSE
+            if getattr(self, 'manual_override_requested', None) is not None:
+                gx, gy, gyaw = self.manual_override_requested
+                self.manual_override_requested = None
+                self.safe_cancel_task()
+                self.manual_override_active = True
+                self.manual_target_pose = (gx, gy, gyaw)
+                self.current_target_goal = (gx, gy)
+                self.goal_dispatch_time = time.time()
+                target_pose = self.create_pose_stamped(gx, gy, gyaw)
+                self.safe_go_to_pose(target_pose)
+                self.state = self.STATE_NAVIGATING
+                self.publish_status(f"OPERATOR_DISPATCH ({gx:.2f}, {gy:.2f})")
+                continue
 
             if not self.is_enabled:
                 time.sleep(0.5)
@@ -478,42 +676,114 @@ class FrontierExplorerFSM(BasicNavigator):
                 continue
             rx, ry, ryaw = pose
 
+            # Calculate SLAM progress and monitor map cell growth
+            if self.latest_map is not None:
+                grid = np.array(self.latest_map.data, dtype=np.int8)
+                free_count = int(np.sum(grid == 0))
+                # Target free cells across the full 20m x 25m warehouse is ~175000
+                target_free = 140000.0
+                mapped_ratio = min(0.98, free_count / target_free)
+                est_prog = 15.0 + mapped_ratio * 84.0
+                self.current_progress = max(self.current_progress, est_prog)
+
+                if free_count > (self.last_known_free + 30):
+                    self.last_known_free = free_count
+                    self.last_growth_time = time.time()
+
+            # Periodic progress broadcast (~2 Hz)
+            now_t = time.time()
+            if now_t - last_progress_time >= 0.5:
+                last_progress_time = now_t
+                self.publish_progress(min(self.current_progress, 99.0), "STAGE 1: MAPPING")
+
             if self.state == self.STATE_FIND_FRONTIER:
                 candidates = self.detect_frontiers(rx, ry)
-                if not candidates:
-                    self.zero_frontiers_count += 1
-                    elapsed = time.time() - start_explore_time
-                    self.info(
-                        f"[auto_explorer] No direct frontiers found (check {self.zero_frontiers_count}/8, elapsed: {elapsed:.1f}s)..."
-                    )
-                    if self.zero_frontiers_count >= 8 and elapsed >= min_mapping_duration:
-                        self.auto_finish_and_return_home(use_nav2=True)
-                        break
-                    else:
-                        # Sweep in place to detect open passages
-                        twist = Twist()
-                        twist.angular.z = 0.55
-                        self.publish_cmd(twist)
-                        time.sleep(1.2)
-                        self.stop_robot()
-                        continue
+                now_check = time.time()
+                elapsed_explore = now_check - start_explore_time
 
-                self.zero_frontiers_count = 0
+                # Track no reachable frontiers duration
+                if not candidates:
+                    if self.no_frontier_start_time is None:
+                        self.no_frontier_start_time = now_check
+                    no_frontiers_sec = now_check - self.no_frontier_start_time
+                else:
+                    self.no_frontier_start_time = None
+                    no_frontiers_sec = 0.0
+
+                # Track map growth plateau duration
+                plateau_sec = now_check - self.last_growth_time
+
+                # Autonomous mapping completion: requires full coverage of all warehouse aisles
+                should_complete = (
+                    (no_frontiers_sec >= 8.0 and self.frontiers_visited >= 6 and elapsed_explore >= 80.0)
+                    or (no_frontiers_sec >= 8.0 and elapsed_explore >= 160.0)
+                    or (len(candidates) == 0 and plateau_sec >= 25.0 and elapsed_explore >= 120.0 and self.frontiers_visited >= 6)
+                    or (elapsed_explore >= 240.0 and self.current_progress >= 85.0)
+                )
+                if should_complete:
+                    self.info(
+                        f"[auto_explorer] All warehouse aisles explored (progress: {self.current_progress:.1f}%, frontiers: {self.frontiers_visited}). Returning to base!"
+                    )
+                    self.current_progress = 100.0
+                    self.publish_progress(100.0, "STAGE 1: MAPPING")
+                    self.auto_finish_and_return_home(use_nav2=True)
+                    break
+
+                if not candidates:
+                    # In-place sweep to scan hidden gaps
+                    twist = Twist()
+                    twist.angular.z = 0.55
+                    self.publish_cmd(twist)
+                    time.sleep(0.8)
+                    self.stop_robot()
+                    continue
+
                 best = candidates[0]
                 _, target_x, target_y, target_yaw, cluster_size = best
                 self.info(
                     f"[auto_explorer] Next Frontier: ({target_x:.2f}, {target_y:.2f}) "
-                    f"| Cluster: {cluster_size} cells. Dispatching Nav2..."
+                    f"| Cluster: {cluster_size} cells. Progress: {self.current_progress:.1f}%. Dispatching Nav2..."
                 )
 
                 target_pose = self.create_pose_stamped(target_x, target_y, target_yaw)
-                self.goToPose(target_pose)
+                self.safe_go_to_pose(target_pose)
                 self.current_target_goal = (target_x, target_y)
+                self.goal_dispatch_time = time.time()
                 self.state = self.STATE_NAVIGATING
                 last_map_check_time = time.time()
 
             elif self.state == self.STATE_NAVIGATING:
+                if self.current_target_goal is None:
+                    self.state = self.STATE_FIND_FRONTIER
+                    continue
+
                 target_x, target_y = self.current_target_goal
+                now_sec = time.time()
+                elapsed_explore = now_sec - start_explore_time
+
+                # Hard safety timeout during navigation
+                if elapsed_explore >= 240.0 and self.current_progress >= 85.0:
+                    self.info("[auto_explorer] Max mapping duration reached during navigation. Returning to base!")
+                    self.safe_cancel_task()
+                    self.auto_finish_and_return_home(use_nav2=True)
+                    break
+
+                # If under manual operator dispatch, wait for arrival or operator timeout
+                if self.manual_override_active:
+                    if (hasattr(self, 'goal_dispatch_time') and (now_sec - self.goal_dispatch_time > 45.0)) or self.safe_is_task_complete():
+                        self.info(f"[auto_explorer] Operator dispatch to ({target_x:.2f}, {target_y:.2f}) completed.")
+                        self.manual_override_active = False
+                        self.state = self.STATE_FIND_FRONTIER
+                        time.sleep(1.0)
+                    continue
+
+                # Per-goal timeout to prevent hanging on difficult/unreachable frontiers
+                if hasattr(self, 'goal_dispatch_time') and (now_sec - self.goal_dispatch_time > 35.0):
+                    self.warn(f"[auto_explorer] Goal to ({target_x:.2f}, {target_y:.2f}) timed out after 35s. Blacklisting.")
+                    self.safe_cancel_task()
+                    self.blacklisted_goals.append((target_x, target_y))
+                    self.state = self.STATE_FIND_FRONTIER
+                    continue
 
                 now_sec = time.time()
                 if now_sec - last_map_check_time >= 1.5:
@@ -523,14 +793,19 @@ class FrontierExplorerFSM(BasicNavigator):
                             f"[auto_explorer] Area around ({target_x:.2f}, {target_y:.2f}) "
                             f"was fully scanned en route. Cancelling goal early!"
                         )
-                        self.cancelTask()
+                        self.safe_cancel_task()
                         self.state = self.STATE_FIND_FRONTIER
                         continue
 
-                if self.isTaskComplete():
-                    res = self.getResult()
+                if self.safe_is_task_complete():
+                    try:
+                        res = self.getResult()
+                    except Exception:
+                        res = TaskResult.SUCCEEDED
+
                     if res == TaskResult.SUCCEEDED:
                         self.info(f"[auto_explorer] Reached frontier ({target_x:.2f}, {target_y:.2f}).")
+                        self.frontiers_visited += 1
                     elif res == TaskResult.FAILED:
                         self.warn(f"[auto_explorer] Goal to ({target_x:.2f}, {target_y:.2f}) failed. Blacklisting.")
                         self.blacklisted_goals.append((target_x, target_y))
@@ -549,41 +824,67 @@ class FrontierExplorerFSM(BasicNavigator):
         self.check_initial_spin()
 
         free_history = []
-        stable_checks = 0
         start_explore_time = time.time()
-        last_coverage_check_time = time.time()
-        min_mapping_duration = 45.0  # seconds minimum exploration time
+        self.last_growth_time = time.time()
+        last_progress_time = time.time()
 
         while rclpy.ok() and self.state != self.STATE_FINISHED:
             rclpy.spin_once(self, timeout_sec=0.1)
+
+            # Check if operator requested Return to Base or Resume Patrol
+            if getattr(self, 'request_return_home', False) or getattr(self, 'request_resume_patrol', False):
+                self.request_return_home = False
+                self.request_resume_patrol = False
+                self.info("[auto_explorer] Processing operator completion request. Returning to base...")
+                self.current_progress = 100.0
+                self.publish_progress(100.0, "STAGE 1: MAPPING")
+                self.auto_finish_and_return_home(use_nav2=False)
+                break
+
+            # Check if operator requested GOTO_POSE
+            if getattr(self, 'manual_override_requested', None) is not None:
+                gx, gy, gyaw = self.manual_override_requested
+                self.manual_override_requested = None
+                self.safe_cancel_task()
+                self.manual_override_active = True
+                self.manual_target_pose = (gx, gy, gyaw)
+                self.current_target_goal = (gx, gy)
+                self.goal_dispatch_time = time.time()
+                target_pose = self.create_pose_stamped(gx, gy, gyaw)
+                self.safe_go_to_pose(target_pose)
+                self.state = self.STATE_NAVIGATING
+                self.publish_status(f"OPERATOR_DISPATCH ({gx:.2f}, {gy:.2f})")
+                continue
 
             if not self.is_enabled:
                 time.sleep(0.5)
                 continue
 
-            # Periodic coverage check ONLY every 8.0 seconds
             now_t = time.time()
-            if (now_t - last_coverage_check_time) >= 8.0 and (self.latest_map is not None):
-                last_coverage_check_time = now_t
+            if self.latest_map is not None:
                 grid = np.array(self.latest_map.data, dtype=np.int8)
                 free_count = int(np.sum(grid == 0))
-                free_history.append(free_count)
-                if len(free_history) > 6:
-                    free_history.pop(0)
+                target_free = 140000.0
+                mapped_ratio = min(0.98, free_count / target_free)
+                est_prog = 15.0 + mapped_ratio * 84.0
+                self.current_progress = max(self.current_progress, est_prog)
 
-                # Only evaluate completion after minimum duration
+                if free_count > (self.last_known_free + 30):
+                    self.last_known_free = free_count
+                    self.last_growth_time = now_t
+
                 elapsed = now_t - start_explore_time
-                if elapsed >= min_mapping_duration and len(free_history) >= 4:
-                    growth = free_history[-1] - free_history[0]
-                    self.info(f"[Coverage Check] Free cells: {free_count} | 24s Growth: {growth}")
-                    if growth < 25:
-                        stable_checks += 1
-                        if stable_checks >= 3:
-                            self.info("[auto_explorer] Map coverage stable across 3 checks. Mapping complete!")
-                            self.auto_finish_and_return_home(use_nav2=False)
-                            break
-                    else:
-                        stable_checks = 0
+                plateau_sec = now_t - self.last_growth_time
+                if (elapsed >= 90.0 and self.current_progress >= 85.0 and plateau_sec >= 12.0) or (elapsed >= 220.0):
+                    self.info(f"[auto_explorer FTG] Warehouse coverage satisfied (elapsed: {elapsed:.1f}s). Mapping complete!")
+                    self.current_progress = 100.0
+                    self.publish_progress(100.0, "STAGE 1: MAPPING")
+                    self.auto_finish_and_return_home(use_nav2=False)
+                    break
+
+            if now_t - last_progress_time >= 0.5:
+                last_progress_time = now_t
+                self.publish_progress(min(self.current_progress, 99.0), "STAGE 1: MAPPING")
 
             # Reactive FTG motion
             self.step_standalone_ftg()

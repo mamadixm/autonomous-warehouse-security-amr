@@ -163,7 +163,16 @@ class SecurityVisionAnalyzer:
         max_vest_area = 0.0
         for c in vest_contours:
             area = cv2.contourArea(c)
-            if area > self.min_detection_area and area > max_vest_area:
+            if area <= self.min_detection_area:
+                continue
+            vx, vy, vbw, vbh = cv2.boundingRect(c)
+            # Must strictly have ground plane contact and upright human aspect ratio
+            if (vy + vbh) < 235 or vbh < 45 or vbw < 18:
+                continue
+            aspect = vbh / float(vbw) if vbw > 0 else 0
+            if aspect < 1.0 or aspect > 3.6:
+                continue
+            if area > max_vest_area:
                 max_vest_area = area
                 best_vest_c = c
 
@@ -178,7 +187,36 @@ class SecurityVisionAnalyzer:
         max_red_area = 0.0
         for c in red_contours:
             area = cv2.contourArea(c)
-            if area > self.min_detection_area and area > max_red_area:
+            if area < 300:
+                continue
+            x, y, bw, bh = cv2.boundingRect(c)
+            cy = y + bh / 2.0
+
+            # Filter 1: Ceiling / overhead crane rejection (top 31% of image)
+            if cy < 150:
+                continue
+
+            # Filter 2: Ground plane contact (intruder base must be at or below horizon line)
+            if (y + bh) < 230:
+                continue
+
+            # Filter 3: Upright cylinder aspect ratio (height >= width)
+            aspect = bh / float(bw) if bw > 0 else 0
+            if aspect < 1.05 or aspect > 3.6:
+                continue
+
+            # Filter 4: Dimensions for cylinder detection up to ~5m range
+            if bh < 40 or bw < 15:
+                continue
+
+            # Filter 5: Chromatic verification - genuine pure red dominance
+            crop = frame[y:y+bh, x:x+bw]
+            b_c, g_c, r_c = cv2.split(crop)
+            pure_red_ratio = np.mean((r_c > 160) & (r_c > 1.4 * g_c.astype(float)) & (r_c > 1.4 * b_c.astype(float)))
+            if pure_red_ratio < 0.20:
+                continue
+
+            if area > max_red_area:
                 max_red_area = area
                 best_red_c = c
 
@@ -213,8 +251,8 @@ class SecurityVisionAnalyzer:
                 details=details
             )
 
-        # Disambiguate: if red intruder signature is dominant over vest reflections
-        if best_red_c is not None and max_red_area >= max_vest_area:
+        # Prioritize unauthorized intruder hazard red signature
+        if best_red_c is not None:
             x, y, bw, bh = cv2.boundingRect(best_red_c)
             cx = x + bw // 2
             cy = y + bh // 2
@@ -276,81 +314,6 @@ class SecurityVisionAnalyzer:
             return VisionDetectionResult(
                 camera_source=camera_source,
                 classification="AUTHORIZED_SECURITY",
-                confidence=conf,
-                bearing_error_rad=bearing_rad,
-                pixel_err_x=pixel_err_x,
-                bbox=bbox,
-                annotated_frame=annotated,
-                target_center=(cx, cy),
-                details=details
-            )
-
-        # Step 3: Motion / Foreground fallback
-        if camera_source == "front":
-            self.frame_count_front += 1
-            warmup = self.frame_count_front <= 5
-            subtractor = self.bg_subtractor_front
-        else:
-            self.frame_count_rear += 1
-            warmup = self.frame_count_rear <= 5
-            subtractor = self.bg_subtractor_rear
-
-        fg_mask = subtractor.apply(frame)
-        fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel)
-
-        best_motion_c = None
-        max_motion_area = 0.0
-
-        # Only evaluate motion after warmup frames and ignore full-frame transitions
-        if not warmup:
-            motion_contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for c in motion_contours:
-                area = cv2.contourArea(c)
-                # Discard entire-screen flashes or background initializations
-                if area > (self.min_detection_area * 1.5) and area < (0.50 * w * h) and area > max_motion_area:
-                    max_motion_area = area
-                    best_motion_c = c
-
-        # Determine if an unauthorized threat is present
-        target_c = best_red_c if best_red_c is not None else best_motion_c
-        threat_area = max_red_area if best_red_c is not None else max_motion_area
-
-        if target_c is not None and threat_area > self.min_detection_area:
-            x, y, bw, bh = cv2.boundingRect(target_c)
-            cx = x + bw // 2
-            cy = y + bh // 2
-            bbox = (x, y, bw, bh)
-            pixel_err_x = center_x - cx
-            bearing_rad = -((cx - center_x) / (center_x)) * (self.camera_hfov / 2.0)
-
-            # Confidence calculation based on area and color vs motion
-            base_conf = 0.85 if best_red_c is not None else 0.70
-            conf = min(0.99, base_conf + (threat_area / (w * h)) * 1.5)
-
-            # Enforce shift policy: after-hours non-badged = UNAUTHORIZED_INTRUDER
-            classification = "UNAUTHORIZED_INTRUDER" if is_after_hours else "UNAUTHORIZED_INTRUDER"
-            details = (
-                f"Hazard red anomaly detected (area={int(threat_area)})"
-                if best_red_c is not None
-                else f"Unbadged motion signature in restricted zone (area={int(threat_area)})"
-            )
-
-            cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (0, 0, 255), 2)
-            cv2.drawMarker(annotated, (cx, cy), (0, 0, 255), cv2.MARKER_CROSS, 16, 2)
-            cv2.putText(
-                annotated,
-                f"INTRUDER ALERT ({conf*100:.0f}%)",
-                (x, max(25, y - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 0, 255),
-                2
-            )
-            self._draw_hud(annotated, camera_source, classification, conf, is_after_hours)
-
-            return VisionDetectionResult(
-                camera_source=camera_source,
-                classification=classification,
                 confidence=conf,
                 bearing_error_rad=bearing_rad,
                 pixel_err_x=pixel_err_x,

@@ -28,6 +28,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan, Image
 from std_msgs.msg import String, Bool
 from cv_bridge import CvBridge, CvBridgeError
+import tf2_ros
 
 from nav2_simple_commander.robot_navigator import BasicNavigator, TaskResult
 from amr_navigation.security_vision import SecurityVisionAnalyzer, VisionDetectionResult
@@ -65,8 +66,8 @@ class SecurityGuardFSM(BasicNavigator):
         if not self.has_parameter('use_sim_time'):
             self.declare_parameter('use_sim_time', True)
 
-        self.declare_parameter('snapshot_dir', '/home/mmdixm/amr_project_ws/data/snapshots')
-        self.declare_parameter('db_path', '/home/mmdixm/amr_project_ws/data/security_incidents.db')
+        self.declare_parameter('snapshot_dir', '/home/mmdixm/Desktop/amr_security_ws/data/snapshots')
+        self.declare_parameter('db_path', '/home/mmdixm/Desktop/amr_security_ws/data/security_incidents.db')
         self.declare_parameter('alert_hold_duration_sec', 4.0)
         self.declare_parameter('home_x', 0.0)
         self.declare_parameter('home_y', 0.0)
@@ -164,6 +165,11 @@ class SecurityGuardFSM(BasicNavigator):
         self.state = self.STATE_INIT
         self.return_to_base_requested = False
         self.override_pose: Optional[Tuple[float, float, float]] = None
+        self.nav_started = False
+
+        # TF Buffer & Listener for true Map-frame Pose Tracking
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # Robot Pose & Simulated Battery
         self.pos_x = 0.0
@@ -181,8 +187,12 @@ class SecurityGuardFSM(BasicNavigator):
         # Detection Tracking
         self.front_result: Optional[VisionDetectionResult] = None
         self.rear_result: Optional[VisionDetectionResult] = None
+        self.front_threat_streak = 0
+        self.rear_threat_streak = 0
         self.last_incident_id: Optional[int] = None
         self.last_incident_time = 0.0
+        self.incident_cooldown_sec = 18.0
+        self.waiting_for_operator = False
 
         # RFID Whitelist State
         self.last_rfid_beacon_time = 0.0
@@ -264,6 +274,10 @@ class SecurityGuardFSM(BasicNavigator):
                 is_after_hours=self.is_after_hours(),
                 rfid_whitelisted=self.is_rfid_active()
             )
+            if self.front_result and self.front_result.classification == "UNAUTHORIZED_INTRUDER":
+                self.front_threat_streak += 1
+            else:
+                self.front_threat_streak = 0
         except CvBridgeError as e:
             self.get_logger().error(f'Front CvBridge error: {e}')
 
@@ -277,6 +291,10 @@ class SecurityGuardFSM(BasicNavigator):
                 is_after_hours=self.is_after_hours(),
                 rfid_whitelisted=self.is_rfid_active()
             )
+            if self.rear_result and self.rear_result.classification == "UNAUTHORIZED_INTRUDER":
+                self.rear_threat_streak += 1
+            else:
+                self.rear_threat_streak = 0
         except CvBridgeError as e:
             self.get_logger().error(f'Rear CvBridge error: {e}')
 
@@ -290,33 +308,100 @@ class SecurityGuardFSM(BasicNavigator):
             self.get_logger().warn('Return-to-Base trigger received via topic!')
             self.return_to_base_requested = True
 
+    # --------------------------------------------------------------------------
+    # Safe Nav2 Wrappers
+    # --------------------------------------------------------------------------
+    def safe_cancel_task(self):
+        try:
+            if hasattr(self, 'goal_handle') and self.goal_handle:
+                try:
+                    self.goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+                self.goal_handle = None
+            self.result_future = None
+            stop_twist = Twist()
+            self.cmd_vel_pub.publish(stop_twist)
+        except Exception as e:
+            self.get_logger().warn(f"cancelTask exception: {e}")
+
+    def safe_go_to_pose(self, pose: PoseStamped) -> bool:
+        try:
+            self.goToPose(pose)
+            return True
+        except Exception as e:
+            self.get_logger().error(f"goToPose exception: {e}")
+            return False
+
+    def safe_is_task_complete(self) -> bool:
+        try:
+            return self.isTaskComplete()
+        except Exception:
+            return True
+
     def operator_command_callback(self, msg: String):
         try:
             cmd = json.loads(msg.data)
             action = cmd.get("action", "").upper().strip()
+            now = time.time()
+
+            # Debounce duplicate commands within 0.4s
+            if hasattr(self, '_last_cmd_action') and self._last_cmd_action == action and (now - getattr(self, '_last_cmd_time', 0.0) < 0.4):
+                return
+            self._last_cmd_action = action
+            self._last_cmd_time = now
+
             self.get_logger().info(f"[OPERATOR COMMAND] Received action: {action}")
 
             if action == "CONFIRM_INTRUDER":
                 if self.last_incident_id is not None:
                     self.logger_db.update_operator_status(self.last_incident_id, "CONFIRMED_INTRUDER")
-                    self.publish_status(f"Operator CONFIRMED intruder incident #{self.last_incident_id}!")
+                    self.publish_status(f"Operator CONFIRMED intruder incident #{self.last_incident_id}! Resuming patrol.")
+                self.waiting_for_operator = False
+                self.last_incident_time = time.time() + 25.0
+                self.front_threat_streak = 0
+                self.rear_threat_streak = 0
+                self.state = self.STATE_PATROL
             elif action == "MARK_AUTHORIZED":
                 if self.last_incident_id is not None:
                     self.logger_db.update_operator_status(self.last_incident_id, "AUTHORIZED")
-                    self.last_rfid_beacon_time = time.time() + 30.0  # grant 30s whitelist
-                    self.publish_status(f"Operator marked incident #{self.last_incident_id} as AUTHORIZED staff.")
-            elif action == "RESUME_PATROL":
+                    self.last_rfid_beacon_time = time.time() + 60.0  # grant 60s whitelist
+                    self.publish_status(f"Operator marked incident #{self.last_incident_id} as AUTHORIZED staff. Resuming patrol.")
+                self.waiting_for_operator = False
+                self.last_incident_time = time.time() + 25.0
+                self.front_threat_streak = 0
+                self.rear_threat_streak = 0
                 self.state = self.STATE_PATROL
-                self.publish_status("Operator commanded RESUME_PATROL.")
+            elif action == "RESUME_PATROL":
+                self.waiting_for_operator = False
+                self.last_incident_time = time.time() + 25.0
+                self.front_threat_streak = 0
+                self.rear_threat_streak = 0
+                self.return_to_base_requested = False
+                self.override_pose = None
+                self.nav_started = False
+                self.safe_cancel_task()
+                self.state = self.STATE_PATROL
+                self.publish_status("Operator commanded RESUME_PATROL. Resuming perimeter patrol.")
             elif action == "RETURN_TO_BASE":
+                self.waiting_for_operator = False
                 self.return_to_base_requested = True
+                self.override_pose = None
+                self.nav_started = False
+                self.safe_cancel_task()
+                self.state = self.STATE_RETURN_TO_BASE
+                self.publish_status("Operator commanded RETURN_TO_BASE.")
             elif action == "GOTO_POSE":
                 gx = float(cmd.get("x", 0.0))
                 gy = float(cmd.get("y", 0.0))
                 gyaw = float(cmd.get("yaw", 0.0))
+                self.waiting_for_operator = False
+                self.return_to_base_requested = False
                 self.override_pose = (gx, gy, gyaw)
+                self.nav_started = False
+                self.safe_cancel_task()
                 self.state = self.STATE_OPERATOR_OVERRIDE
-                self.publish_status(f"Operator commanded GOTO_POSE ({gx:.2f}, {gy:.2f}, {gyaw:.2f})")
+                self.publish_status(f"Operator commanded GOTO_POSE ({gx:.2f}, {gy:.2f})")
         except Exception as e:
             self.get_logger().error(f"Failed to parse operator command: {e}")
 
@@ -336,7 +421,26 @@ class SecurityGuardFSM(BasicNavigator):
         self.status_pub.publish(msg)
         self.get_logger().info(msg.data)
 
+    def get_robot_pose(self):
+        """Lookup current robot pose in map frame."""
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_footprint', rclpy.time.Time())
+            rx = t.transform.translation.x
+            ry = t.transform.translation.y
+            q = t.transform.rotation
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            ryaw = math.atan2(siny_cosp, cosy_cosp)
+            return rx, ry, ryaw
+        except Exception:
+            return None
+
     def publish_telemetry(self):
+        # Update map-frame robot pose from TF if available
+        pose = self.get_robot_pose()
+        if pose is not None:
+            self.pos_x, self.pos_y, self.current_yaw = pose
+
         # Update simulated battery consumption
         if self.state in [self.STATE_PATROL, self.STATE_ALERT, self.STATE_REAR_TURN]:
             self.battery_pct = max(5.0, self.battery_pct - 0.005)
@@ -428,17 +532,31 @@ class SecurityGuardFSM(BasicNavigator):
             f"Sensors verified: Scan={self.scan_received}, FrontCam={self.latest_front_cv is not None}, RearCam={self.latest_rear_cv is not None}"
         )
 
-        # Set initial pose to (0, 0, 0)
-        init_pose = self.create_pose_stamped(0.0, 0.0, 0.0)
-        for _ in range(3):
-            self.setInitialPose(init_pose)
-            time.sleep(0.3)
+        # Wait for Nav2 'navigate_to_pose' action server
+        self.publish_status("Waiting for Nav2 action server ('navigate_to_pose')...")
+        server_ready = self.nav_to_pose_client.wait_for_server(timeout_sec=15.0)
+        if not server_ready:
+            self.get_logger().warn("Nav2 action server not immediately available; proceeding with pose seeding.")
 
-        self.publish_status("Waiting for Nav2 to become active...")
-        try:
-            self.waitUntilNav2Active(localizer='amcl')
-        except Exception as e:
-            self.get_logger().warn(f"AMCL wait returned: {e}. Transitioning to PATROL.")
+        # Seed AMCL with initial pose (0, 0, 0)
+        self.publish_status("Seeding AMCL initial pose at Home Base (0.0, 0.0, 0.0)...")
+        init_pose = self.create_pose_stamped(0.0, 0.0, 0.0)
+        for _ in range(5):
+            self.setInitialPose(init_pose)
+            rclpy.spin_once(self, timeout_sec=0.2)
+            time.sleep(0.2)
+
+        # Wait up to 10s for TF map -> base_footprint from AMCL
+        wait_start = time.time()
+        while rclpy.ok() and (time.time() - wait_start < 10.0):
+            try:
+                if self.tf_buffer.can_transform('map', 'base_footprint', rclpy.time.Time(), timeout=Duration(seconds=0.5)):
+                    self.get_logger().info("AMCL localization confirmed (map -> base_footprint resolved).")
+                    break
+            except Exception:
+                pass
+            rclpy.spin_once(self, timeout_sec=0.2)
+
         self.publish_status("Nav2 active. Starting autonomous security patrol.")
         return True
 
@@ -482,14 +600,22 @@ class SecurityGuardFSM(BasicNavigator):
     def handle_alert(self):
         """ALERT: Confront target with front camera, align bearing, log incident, hold standoff."""
         self.state = self.STATE_ALERT
-        self.cancelTask()
+        self.safe_cancel_task()
 
         stop_twist = Twist()
         self.cmd_vel_pub.publish(stop_twist)
 
-        # Log and broadcast alert
-        target_res = self.front_result if self.front_result and self.front_result.classification else self.rear_result
-        if target_res:
+        # Allow brief window for camera frames to refresh if needed
+        start_wait = time.time()
+        while rclpy.ok() and (time.time() - start_wait < 1.0):
+            target_res = self.front_result if (self.front_result and self.front_result.classification) else self.rear_result
+            if target_res and target_res.classification:
+                break
+            rclpy.spin_once(self, timeout_sec=0.1)
+
+        # Log and broadcast alert ONLY if classification is valid
+        target_res = self.front_result if (self.front_result and self.front_result.classification) else self.rear_result
+        if target_res and target_res.classification:
             self.log_and_broadcast_alert(target_res)
 
         # Orient toward target using front camera bearing error
@@ -501,18 +627,24 @@ class SecurityGuardFSM(BasicNavigator):
             self.cmd_vel_pub.publish(stop_twist)
 
         self.publish_status(
-            f"SECURITY ALERT STANDOFF! Intercepting threat. Holding position for {self.alert_hold_duration}s."
+            "🚨 INTRUDER INTERCEPTED! Forensic snapshot recorded. Standoff active — WAITING FOR OPERATOR COMMAND..."
         )
 
-        hold_start = time.time()
-        while (time.time() - hold_start) < self.alert_hold_duration and rclpy.ok():
+        self.waiting_for_operator = True
+        while self.waiting_for_operator and self.state == self.STATE_ALERT and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
             self.cmd_vel_pub.publish(stop_twist)
-            if self.return_to_base_requested or self.state == self.STATE_OPERATOR_OVERRIDE:
+            if self.return_to_base_requested or self.state in [self.STATE_OPERATOR_OVERRIDE, self.STATE_RETURN_TO_BASE]:
                 break
 
+        self.last_incident_time = time.time()
+        self.front_threat_streak = 0
+        self.rear_threat_streak = 0
+        self.front_result = None
+        self.rear_result = None
+
         if self.state not in [self.STATE_OPERATOR_OVERRIDE, self.STATE_RETURN_TO_BASE]:
-            self.publish_status("Incident recorded. Resuming security perimeter patrol.")
+            self.publish_status("Operator command acknowledged. Resuming security perimeter patrol.")
             self.state = self.STATE_PATROL
 
     def handle_recovery(self):
@@ -538,27 +670,63 @@ class SecurityGuardFSM(BasicNavigator):
         self.state = self.STATE_PATROL
 
     def handle_return_to_base(self):
-        """RETURN_TO_BASE: Return to home pose (0, 0, 0)."""
+        """RETURN_TO_BASE: Return to home pose (0, 0, 0) and standby until operator command."""
         self.state = self.STATE_RETURN_TO_BASE
-        self.cancelTask()
+        self.return_to_base_requested = False
+        self.safe_cancel_task()
         self.publish_status(f"Returning to Home Base Station: x={self.home_pose[0]}, y={self.home_pose[1]}")
 
         home_stamped = self.create_pose_stamped(
             self.home_pose[0], self.home_pose[1], self.home_pose[2]
         )
-        self.goToPose(home_stamped)
+        self.safe_go_to_pose(home_stamped)
 
-        while not self.isTaskComplete() and rclpy.ok():
+        rtb_start = time.time()
+        while not self.safe_is_task_complete() and rclpy.ok() and (time.time() - rtb_start < 35.0):
             rclpy.spin_once(self, timeout_sec=0.2)
+            if self.state in [self.STATE_OPERATOR_OVERRIDE, self.STATE_PATROL]:
+                return
+            pose = self.get_robot_pose()
+            if pose:
+                self.pos_x, self.pos_y, self.current_yaw = pose
+            dist_to_home = math.hypot(self.pos_x - self.home_pose[0], self.pos_y - self.home_pose[1])
+            if dist_to_home <= 0.35:
+                self.publish_status("Robot safely docked at Home Base Station (<=0.35m).")
+                self.safe_cancel_task()
+                break
 
-        result = self.getResult()
-        if result == TaskResult.SUCCEEDED:
-            self.publish_status("Robot safely docked at Home Base Station.")
-        else:
-            self.get_logger().warn("Failed to reach Home Base Station cleanly.")
+        # Fallback direct approach if still > 0.35m away
+        dist_to_home = math.hypot(self.pos_x - self.home_pose[0], self.pos_y - self.home_pose[1])
+        if dist_to_home > 0.35 and self.state not in [self.STATE_OPERATOR_OVERRIDE, self.STATE_PATROL]:
+            start_b = time.time()
+            while rclpy.ok() and (time.time() - start_b < 12.0):
+                rclpy.spin_once(self, timeout_sec=0.1)
+                if self.state in [self.STATE_OPERATOR_OVERRIDE, self.STATE_PATROL]:
+                    return
+                pose = self.get_robot_pose()
+                if pose:
+                    self.pos_x, self.pos_y, self.current_yaw = pose
+                dist = math.hypot(self.pos_x - self.home_pose[0], self.pos_y - self.home_pose[1])
+                if dist <= 0.35:
+                    self.publish_status("Docked at home base via direct velocity approach.")
+                    break
+                target_yaw = math.atan2(self.home_pose[1] - self.pos_y, self.home_pose[0] - self.pos_x)
+                yaw_diff = math.atan2(math.sin(target_yaw - self.current_yaw), math.cos(target_yaw - self.current_yaw))
+                twist = Twist()
+                twist.linear.x = 0.20
+                twist.angular.z = float(np.clip(1.2 * yaw_diff, -0.6, 0.6))
+                self.cmd_vel_pub.publish(twist)
+                time.sleep(0.05)
+            self.cmd_vel_pub.publish(Twist())
 
-        self.pause_and_scan(4.0)
-        self.state = self.STATE_PATROL
+        self.publish_status("Robot safely docked at Home Base Station (0, 0). Standby for operator dispatch.")
+        self.cmd_vel_pub.publish(Twist())
+        self.nav_started = False
+
+        # Standby at base until operator resumes patrol or dispatches to target
+        while self.state == self.STATE_RETURN_TO_BASE and rclpy.ok():
+            rclpy.spin_once(self, timeout_sec=0.2)
+            self.cmd_vel_pub.publish(Twist())
 
     def handle_operator_override(self):
         """OPERATOR_OVERRIDE: Navigate to operator-commanded pose."""
@@ -567,20 +735,31 @@ class SecurityGuardFSM(BasicNavigator):
             return
 
         gx, gy, gyaw = self.override_pose
-        self.cancelTask()
+        self.safe_cancel_task()
         self.publish_status(f"Executing Operator Dispatch to ({gx:.2f}, {gy:.2f})")
         target_stamped = self.create_pose_stamped(gx, gy, gyaw)
-        self.goToPose(target_stamped)
+        self.safe_go_to_pose(target_stamped)
 
-        while not self.isTaskComplete() and rclpy.ok():
+        goto_start = time.time()
+        while not self.safe_is_task_complete() and rclpy.ok() and (time.time() - goto_start < 45.0):
             rclpy.spin_once(self, timeout_sec=0.2)
             if self.return_to_base_requested:
                 break
+            pose = self.get_robot_pose()
+            if pose:
+                self.pos_x, self.pos_y, self.current_yaw = pose
+            dist_to_target = math.hypot(self.pos_x - gx, self.pos_y - gy)
+            if dist_to_target <= 0.35:
+                self.publish_status(f"Arrived at Operator Dispatch target ({gx:.2f}, {gy:.2f}).")
+                self.safe_cancel_task()
+                break
 
         self.override_pose = None
-        self.publish_status("Operator dispatch goal reached. Pausing for inspection.")
-        self.pause_and_scan(3.0)
-        self.state = self.STATE_PATROL
+        if not self.return_to_base_requested and self.state == self.STATE_OPERATOR_OVERRIDE:
+            self.publish_status("Operator dispatch goal reached. Pausing for inspection.")
+            self.pause_and_scan(3.0)
+            self.nav_started = False
+            self.state = self.STATE_PATROL
 
     def pause_and_scan(self, duration_sec: float):
         stop_twist = Twist()
@@ -595,45 +774,54 @@ class SecurityGuardFSM(BasicNavigator):
             return
 
         self.state = self.STATE_PATROL
-        nav_started = False
+        self.nav_started = False
 
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
 
             # Check RTB
-            if self.return_to_base_requested:
+            if self.return_to_base_requested or self.state == self.STATE_RETURN_TO_BASE:
                 self.return_to_base_requested = False
                 self.handle_return_to_base()
-                nav_started = False
+                self.nav_started = False
                 continue
 
             # Check Operator Override
             if self.state == self.STATE_OPERATOR_OVERRIDE:
                 self.handle_operator_override()
-                nav_started = False
+                self.nav_started = False
                 continue
 
             # State: PATROL
             if self.state == self.STATE_PATROL:
-                # 1. Check Rear Camera first: if intruder behind robot, execute 180° spin
+                now_t = time.time()
+                is_cooldown = (now_t - self.last_incident_time) < self.incident_cooldown_sec
+
+                # 1. Check Rear Camera first: if confirmed intruder behind robot (streak >= 2), spin 180°
                 if (
-                    self.rear_result
+                    not is_cooldown
+                    and self.rear_threat_streak >= 2
+                    and self.rear_result
                     and self.rear_result.classification == "UNAUTHORIZED_INTRUDER"
                     and not self.is_rfid_active()
                 ):
+                    self.rear_threat_streak = 0
                     self.execute_rear_spin()
                     self.handle_alert()
-                    nav_started = False
+                    self.nav_started = False
                     continue
 
-                # 2. Check Front Camera: if intruder in front, alert and confront
+                # 2. Check Front Camera: if confirmed intruder in front (streak >= 2), alert and confront
                 if (
-                    self.front_result
+                    not is_cooldown
+                    and self.front_threat_streak >= 2
+                    and self.front_result
                     and self.front_result.classification == "UNAUTHORIZED_INTRUDER"
                     and not self.is_rfid_active()
                 ):
+                    self.front_threat_streak = 0
                     self.handle_alert()
-                    nav_started = False
+                    self.nav_started = False
                     continue
 
                 # 3. If authorized security personnel detected, log friendly greeting
@@ -647,21 +835,29 @@ class SecurityGuardFSM(BasicNavigator):
                         self.last_incident_time = now
 
                 # Start navigation to current waypoint if not active
-                if not nav_started:
+                if not self.nav_started:
                     wp = self.waypoints[self.current_waypoint_idx]
                     goal_pose = self.create_pose_stamped(wp[0], wp[1], wp[2])
                     self.publish_status(
                         f"Navigating to Waypoint {self.current_waypoint_idx+1}/{len(self.waypoints)}: x={wp[0]}, y={wp[1]}"
                     )
-                    self.goToPose(goal_pose)
-                    nav_started = True
+                    self.safe_go_to_pose(goal_pose)
+                    self.nav_started = True
                     wp_dispatch_time = time.time()
 
                 # Check waypoint arrival or timeout
                 wp_elapsed = time.time() - wp_dispatch_time if 'wp_dispatch_time' in locals() else 0.0
-                if self.isTaskComplete() or wp_elapsed > 35.0:
-                    result = self.getResult() if self.isTaskComplete() else TaskResult.FAILED
-                    nav_started = False
+                if self.safe_is_task_complete() or wp_elapsed > 35.0:
+                    if not self.safe_is_task_complete():
+                        self.safe_cancel_task()
+                        result = TaskResult.FAILED
+                    else:
+                        try:
+                            result = self.getResult()
+                        except Exception:
+                            result = TaskResult.SUCCEEDED
+
+                    self.nav_started = False
                     if result == TaskResult.SUCCEEDED:
                         self.publish_status(f"Arrived at Waypoint {self.current_waypoint_idx+1}.")
                         self.current_waypoint_idx = (self.current_waypoint_idx + 1) % len(self.waypoints)
@@ -672,7 +868,7 @@ class SecurityGuardFSM(BasicNavigator):
 
             elif self.state == self.STATE_RECOVERY:
                 self.handle_recovery()
-                nav_started = False
+                self.nav_started = False
 
         self.destroy_node()
 

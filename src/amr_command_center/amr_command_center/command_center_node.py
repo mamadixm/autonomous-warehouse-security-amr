@@ -22,8 +22,9 @@ import cv2
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image as RosImage
+from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String as RosString
 from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge, CvBridgeError
@@ -43,10 +44,10 @@ class CommandCenterBridge(Node):
         # Declare ROS 2 parameters
         self.declare_parameter('port', 8000)
         self.declare_parameter('host', '0.0.0.0')
-        self.declare_parameter('db_path', '/home/mmdixm/amr_project_ws/data/security_incidents.db')
-        self.declare_parameter('snapshot_dir', '/home/mmdixm/amr_project_ws/data/snapshots')
-        self.declare_parameter('map_yaml', '/home/mmdixm/amr_project_ws/src/amr_navigation/maps/warehouse_map.yaml')
-        self.declare_parameter('map_pgm', '/home/mmdixm/amr_project_ws/src/amr_navigation/maps/warehouse_map.pgm')
+        self.declare_parameter('db_path', '/home/mmdixm/Desktop/amr_security_ws/data/security_incidents.db')
+        self.declare_parameter('snapshot_dir', '/home/mmdixm/Desktop/amr_security_ws/data/snapshots')
+        self.declare_parameter('map_yaml', '/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map.yaml')
+        self.declare_parameter('map_pgm', '/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map.pgm')
 
         self.port = int(self.get_parameter('port').value)
         self.host = str(self.get_parameter('host').value)
@@ -71,6 +72,12 @@ class CommandCenterBridge(Node):
         self.latest_telemetry: Optional[Dict[str, Any]] = None
         self.latest_alert: Optional[Dict[str, Any]] = None
 
+        # Live Map and SLAM Progress state
+        self.latest_explore_progress: Optional[Dict[str, Any]] = {"progress": 0.0, "stage": "STAGE 1: MAPPING"}
+        self.live_map_png: Optional[bytes] = None
+        self.live_map_meta: Optional[Dict[str, Any]] = None
+        self.last_map_time = 0.0
+
         # Asyncio event loop reference (set on FastAPI startup)
         self.async_loop: Optional[asyncio.AbstractEventLoop] = None
         self.active_websockets: Set[WebSocket] = set()
@@ -80,6 +87,12 @@ class CommandCenterBridge(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
             depth=5
+        )
+        map_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
         )
 
         # Subscriptions
@@ -101,10 +114,17 @@ class CommandCenterBridge(Node):
         self.sub_mission_status = self.create_subscription(
             RosString, '/mission/status', self.mission_status_callback, 10
         )
+        self.sub_explore_progress = self.create_subscription(
+            RosString, '/explore/progress', self.explore_progress_callback, 10
+        )
+        self.sub_map = self.create_subscription(
+            OccupancyGrid, '/map', self.map_callback, map_qos
+        )
 
         # Publishers
         self.pub_operator_cmd = self.create_publisher(RosString, '/security/operator_command', 10)
         self.pub_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.pub_mission_reset = self.create_publisher(RosString, '/mission/reset', 10)
 
         self.get_logger().info(f"AMR Command Center Bridge initialized (Port: {self.port})")
 
@@ -185,6 +205,53 @@ class CommandCenterBridge(Node):
 
     def mission_status_callback(self, msg: RosString):
         self._broadcast_ws({"event": "mission_status", "data": msg.data})
+
+    def explore_progress_callback(self, msg: RosString):
+        try:
+            data = json.loads(msg.data)
+            with self.lock:
+                self.latest_explore_progress = data
+            self._broadcast_ws({"event": "explore_progress", "data": data})
+        except Exception as e:
+            self.get_logger().error(f"Failed to parse explore progress: {e}")
+
+    def map_callback(self, msg: OccupancyGrid):
+        try:
+            w = msg.info.width
+            h = msg.info.height
+            res = msg.info.resolution
+            ox = msg.info.origin.position.x
+            oy = msg.info.origin.position.y
+
+            if w <= 0 or h <= 0:
+                return
+
+            raw = np.array(msg.data, dtype=np.int8).reshape((h, w))
+            # Grayscale map: 0 (free) -> 254 (white), >50 (occupied) -> 0 (black), -1 (unknown) -> 205 (gray)
+            img = np.full((h, w), 205, dtype=np.uint8)
+            img[raw == 0] = 254
+            img[raw > 50] = 0
+
+            # Flip vertically since ROS grid row 0 is bottom (y_min)
+            img = np.flipud(img)
+            _, png = cv2.imencode('.png', img)
+
+            with self.lock:
+                self.live_map_png = png.tobytes()
+                self.live_map_meta = {
+                    "resolution": float(res),
+                    "origin": [float(ox), float(oy), 0.0],
+                    "width": int(w),
+                    "height": int(h),
+                    "occupied_thresh": 0.65,
+                    "free_thresh": 0.196,
+                    "image": "live_map"
+                }
+                self.last_map_time = time.time()
+
+            self._broadcast_ws({"event": "map_update", "timestamp": self.last_map_time})
+        except Exception as e:
+            self.get_logger().error(f"Error converting OccupancyGrid /map to live PNG: {e}")
 
     def _broadcast_ws(self, payload: dict):
         if self.async_loop and self.async_loop.is_running() and self.active_websockets:
@@ -274,17 +341,25 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
         # Send latest telemetry immediately if available
         if node.latest_telemetry:
             await ws.send_text(json.dumps({"event": "telemetry", "data": node.latest_telemetry}))
+        if node.latest_explore_progress:
+            await ws.send_text(json.dumps({"event": "explore_progress", "data": node.latest_explore_progress}))
         try:
             while True:
                 data = await ws.receive_json()
                 msg_type = data.get("type", "")
                 if msg_type == "operator_command":
                     payload = data.get("payload", {})
-                    node.publish_operator_command(json.dumps(payload))
+                    action = payload.get("action", "").upper().strip()
+                    if action == "RESET_MAP":
+                        await reset_map()
+                    else:
+                        node.publish_operator_command(json.dumps(payload))
                 elif msg_type == "teleop":
                     lx = float(data.get("linear_x", 0.0))
                     az = float(data.get("angular_z", 0.0))
                     node.publish_teleop(lx, az)
+                elif msg_type == "reset_map":
+                    await reset_map()
                 elif msg_type == "ping":
                     await ws.send_text(json.dumps({"event": "pong", "time": time.time()}))
         except WebSocketDisconnect:
@@ -297,6 +372,10 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
     # 3. REST API: Map Metadata & Floorplan Image
     @app.get("/api/map/metadata", summary="Warehouse Map Metadata")
     async def get_map_metadata():
+        with node.lock:
+            if node.live_map_meta:
+                return node.live_map_meta
+
         if not os.path.exists(node.map_yaml):
             return {
                 "resolution": 0.05,
@@ -328,6 +407,10 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
 
     @app.get("/api/map/image", summary="Warehouse Floorplan PNG Image")
     async def get_map_image():
+        with node.lock:
+            if node.live_map_png:
+                return Response(content=node.live_map_png, media_type="image/png")
+
         pgm_path = node.map_pgm
         if not os.path.exists(pgm_path):
             # Try finding alongside map_yaml
@@ -343,6 +426,51 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
             return Response(content=png_bytes, media_type="image/png")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to convert map PGM to PNG: {e}")
+
+    @app.post("/api/map/reset", summary="Reset Map & Re-SLAM Autonomous Mapping")
+    async def reset_map():
+        try:
+            # 1. Delete saved map files from both src and install
+            map_paths = [
+                "/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map.yaml",
+                "/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map.pgm",
+                "/home/mmdixm/Desktop/amr_security_ws/src/amr_navigation/maps/.mapping_complete",
+                "/home/mmdixm/Desktop/amr_security_ws/install/amr_navigation/share/amr_navigation/maps/warehouse_map.yaml",
+                "/home/mmdixm/Desktop/amr_security_ws/install/amr_navigation/share/amr_navigation/maps/warehouse_map.pgm",
+                "/home/mmdixm/Desktop/amr_security_ws/install/amr_navigation/share/amr_navigation/maps/.mapping_complete",
+            ]
+            for p in map_paths:
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        node.get_logger().info(f"[MAP RESET] Deleted: {p}")
+                    except Exception as e:
+                        node.get_logger().warn(f"Failed deleting {p}: {e}")
+
+            # 2. Clear cached map state and reset progress
+            with node.lock:
+                node.live_map_png = None
+                node.live_map_meta = None
+                node.latest_explore_progress = {"progress": 0.0, "stage": "STAGE 1: MAPPING"}
+
+            # 3. Publish to /mission/reset to restart Phase 1 SLAM
+            msg = RosString()
+            msg.data = "RESET"
+            node.pub_mission_reset.publish(msg)
+            node.get_logger().info("[MAP RESET] Published reset to /mission/reset.")
+
+            # 4. Broadcast reset events over WebSocket
+            node._broadcast_ws({"event": "explore_progress", "data": {"progress": 0.0, "stage": "STAGE 1: MAPPING"}})
+            node._broadcast_ws({"event": "mission_stage", "data": "STAGE 1: MAPPING"})
+            node._broadcast_ws({"event": "map_reset", "data": {"status": "success"}})
+
+            return {
+                "success": True,
+                "message": "Map reset initiated. Starting Phase 1 autonomous mapping from (0,0)."
+            }
+        except Exception as e:
+            node.get_logger().error(f"Error handling map reset: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to reset map: {e}")
 
     # 4. REST API: Security Incident Logs & Operator Status Updates
     @app.get("/api/incidents", summary="Get Latest Forensic Security Incidents")
@@ -402,6 +530,19 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Database update error: {e}")
 
+    @app.post("/api/operator/command", summary="Dispatch Operator Command to ROS 2 FSM")
+    async def operator_command_endpoint(payload: dict = Body(...)):
+        try:
+            action = payload.get("action", "").upper().strip()
+            if action == "RESET_MAP":
+                return await reset_map()
+            cmd_str = json.dumps(payload)
+            node.publish_operator_command(cmd_str)
+            return {"success": True, "command": payload}
+        except Exception as e:
+            node.get_logger().error(f"Error handling operator command API: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to dispatch operator command: {e}")
+
     @app.get("/api/health", summary="Command Center Health Check")
     async def health():
         return {
@@ -427,7 +568,7 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
         pass
 
     if not web_dir:
-        src_web = "/home/mmdixm/amr_project_ws/src/amr_command_center/web"
+        src_web = "/home/mmdixm/Desktop/amr_security_ws/src/amr_command_center/web"
         if os.path.exists(src_web):
             web_dir = src_web
 

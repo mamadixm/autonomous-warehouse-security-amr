@@ -20,7 +20,7 @@ Anyone who clones this repository can build and run it out of the box with stand
 ```bash
 cd ~
 git clone https://github.com/mamadixm/autonomous-warehouse-security-amr.git amr_project_ws
-cd ~/amr_project_ws
+cd ~/Desktop/amr_security_ws
 ```
 
 ### 2. Install Dependencies
@@ -50,7 +50,7 @@ colcon build --symlink-install
 ### 4. Single-Command Launch (Autonomous End-to-End Demo)
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/amr_project_ws/install/setup.bash
+source ~/Desktop/amr_security_ws/install/setup.bash
 
 # Run in low-resource headless mode (no GPU overload):
 ros2 launch amr_command_center full_demo.launch.py headless:=true rviz:=false
@@ -205,7 +205,7 @@ stateDiagram-v2
 Execute the complete mission lifecycle automatically from start to finish with a **single command**:
 ```bash
 source /opt/ros/jazzy/setup.bash
-source ~/amr_project_ws/install/setup.bash
+source ~/Desktop/amr_security_ws/install/setup.bash
 ros2 launch amr_command_center full_demo.launch.py
 ```
 > **Tip (Low-Resource / Headless Mode):** To save GPU/CPU and run smoothly without opening heavy GUI windows, simply append `headless:=true rviz:=false`:
@@ -221,7 +221,7 @@ Source your ROS 2 Jazzy underlay and compile the workspace:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd ~/amr_project_ws
+cd ~/Desktop/amr_security_ws
 colcon build --symlink-install
 source install/setup.bash
 ```
@@ -239,7 +239,7 @@ Launch SLAM, Nav2, and the Autonomous Frontier Explorer node together. The robot
 1. **Terminal 1: Start Gazebo Harmonic Simulation**
    ```bash
    source /opt/ros/jazzy/setup.bash
-   source ~/amr_project_ws/install/setup.bash
+   source ~/Desktop/amr_security_ws/install/setup.bash
    ros2 launch amr_gazebo warehouse.launch.py
    # Note: 'sim.launch.py' is also supported as an equivalent alias
    ```
@@ -247,7 +247,7 @@ Launch SLAM, Nav2, and the Autonomous Frontier Explorer node together. The robot
 2. **Terminal 2: Launch SLAM + Nav2 Frontier Exploration**
    ```bash
    source /opt/ros/jazzy/setup.bash
-   source ~/amr_project_ws/install/setup.bash
+   source ~/Desktop/amr_security_ws/install/setup.bash
    ros2 launch amr_navigation auto_mapping.launch.py
    ```
    *The robot will initialize, seed the map with an initial spin, systematically explore all frontiers, automatically save `warehouse_map`, and return to base `(0.0, 0.0, 0.0)`.*
@@ -258,7 +258,7 @@ If you prefer manual steering:
 1. **Terminal 1:** `ros2 launch amr_gazebo sim.launch.py`
 2. **Terminal 2:** `ros2 launch amr_navigation slam.launch.py`
 3. **Terminal 3:** `ros2 run teleop_twist_keyboard teleop_twist_keyboard`
-4. **Terminal 4:** `ros2 run nav2_map_server map_saver_cli -f ~/amr_project_ws/src/amr_navigation/maps/warehouse_map`
+4. **Terminal 4:** `ros2 run nav2_map_server map_saver_cli -f ~/Desktop/amr_security_ws/src/amr_navigation/maps/warehouse_map`
 
 ---
 
@@ -272,7 +272,7 @@ You can launch the complete autonomous security stack and web command center wit
 1. **Terminal 1: Start Simulation in Depot World**
    ```bash
    source /opt/ros/jazzy/setup.bash
-   source ~/amr_project_ws/install/setup.bash
+   source ~/Desktop/amr_security_ws/install/setup.bash
    ros2 launch amr_gazebo warehouse.launch.py
    # Note: 'sim.launch.py' is also supported as an equivalent alias
    ```
@@ -280,7 +280,7 @@ You can launch the complete autonomous security stack and web command center wit
 2. **Terminal 2: Launch Unified Security & Web Command Center**
    ```bash
    source /opt/ros/jazzy/setup.bash
-   source ~/amr_project_ws/install/setup.bash
+   source ~/Desktop/amr_security_ws/install/setup.bash
    ros2 launch amr_command_center security_command_center.launch.py
    ```
    *This starts Nav2 navigation, the 360° Patrol Guard FSM, SQLite blackbox logging, and the FastAPI/WebSocket server on `http://localhost:8080` in one clean command.*
@@ -295,26 +295,26 @@ You can launch the complete autonomous security stack and web command center wit
    Inject threats and authorized staff from the terminal to test live detection:
    - **Test 1: Spawn Unauthorized Intruder Ahead (Red Cylinder):**
      ```bash
-     ~/amr_project_ws/src/amr_gazebo/scripts/spawn_intruder.sh 1.5 0.0 0.35
+     ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_intruder.sh 1.5 0.0 0.35
      ```
      *The AMR detects the threat, stops, aligns bearing, logs the incident to `data/security_incidents.db`, saves a snapshot, and flashes the alert card on the Web UI.*
 
    - **Test 2: Spawn Unauthorized Intruder Behind Robot (Rear Camera 180° Spin Test):**
      ```bash
-     ~/amr_project_ws/src/amr_gazebo/scripts/spawn_intruder.sh -1.5 0.0 0.35
+     ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_intruder.sh -1.5 0.0 0.35
      ```
      *Watch the AMR detect the threat on the REAR camera, execute an in-place 180° spin to confront the target with front sensors, and enter ALERT standoff!*
 
    - **Test 3: Spawn Authorized Security Officer with High-Vis Vest & RFID Badge:**
      ```bash
-     ~/amr_project_ws/src/amr_gazebo/scripts/spawn_guard.sh 1.5 0.0 0.35
+     ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_guard.sh 1.5 0.0 0.35
      ```
      *The AMR identifies the green vest and simulated RFID beacon (`SEC-042`), recognizes the person as `AUTHORIZED_SECURITY`, logs a friendly greeting, and continues patrol.*
 
    - **Clean Up Spawned Targets:**
      ```bash
-     ~/amr_project_ws/src/amr_gazebo/scripts/spawn_intruder.sh delete
-     ~/amr_project_ws/src/amr_gazebo/scripts/spawn_guard.sh delete
+     ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_intruder.sh delete
+     ~/Desktop/amr_security_ws/src/amr_gazebo/scripts/spawn_guard.sh delete
      ```
 
 #### Option B: Modular Multi-Terminal Launch
