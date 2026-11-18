@@ -1,7 +1,7 @@
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -86,6 +86,9 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        # ROS 2 DDS Network Isolation (Localhost-Only Discovery)
+        SetEnvironmentVariable('ROS_AUTOMATIC_DISCOVERY_RANGE', 'LOCALHOST'),
+        SetEnvironmentVariable('ROS_LOCALHOST_ONLY', '1'),
         declare_use_sim_time,
         declare_port,
         declare_rviz,

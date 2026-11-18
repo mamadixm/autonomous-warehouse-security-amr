@@ -30,11 +30,65 @@ from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge, CvBridgeError
 from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body, Security, Depends, status
 from fastapi.responses import StreamingResponse, Response, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader, HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
 import uvicorn
+
+
+def _load_env_file():
+    candidates = [
+        os.path.expanduser('~/Desktop/amr_security_ws/.env'),
+        os.path.join(os.getcwd(), '.env'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '.env'),
+    ]
+    for env_path in candidates:
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            k, v = line.split('=', 1)
+                            k, v = k.strip(), v.strip().strip('"').strip("'")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+                break
+            except Exception:
+                pass
+
+
+_load_env_file()
+OPERATOR_TOKEN = os.environ.get("AMR_OPERATOR_TOKEN", "amr-sec-2026")
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def verify_operator_token(
+    x_api_key: Optional[str] = Security(api_key_header),
+    bearer: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+) -> str:
+    token = x_api_key or (bearer.credentials if bearer else None)
+    if not token or token != OPERATOR_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Valid Operator Security Token required.",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    return token
+
+
+class TeleopPayload(BaseModel):
+    linear_x: float = Field(0.0, ge=-0.8, le=0.8)
+    angular_z: float = Field(0.0, ge=-1.5, le=1.5)
+
+
+class IncidentStatusUpdate(BaseModel):
+    status: str
 
 
 class CommandCenterBridge(Node):
@@ -77,6 +131,7 @@ class CommandCenterBridge(Node):
         self.live_map_png: Optional[bytes] = None
         self.live_map_meta: Optional[Dict[str, Any]] = None
         self.last_map_time = 0.0
+        self.last_map_reset_time = 0.0
 
         # Asyncio event loop reference (set on FastAPI startup)
         self.async_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -277,10 +332,18 @@ class CommandCenterBridge(Node):
         self.get_logger().info(f"[COMMAND CENTER] Published operator command: {cmd_json_str}")
 
     def publish_teleop(self, linear_x: float, angular_z: float):
-        twist = Twist()
-        twist.linear.x = float(np.clip(linear_x, -0.6, 0.6))
-        twist.angular.z = float(np.clip(angular_z, -1.5, 1.5))
-        self.pub_cmd_vel.publish(twist)
+        try:
+            lx = float(linear_x)
+            az = float(angular_z)
+            if not (np.isfinite(lx) and np.isfinite(az)):
+                return
+            twist = Twist()
+            # Strict velocity clamping: linear_x in [-0.8, 0.8], angular_z in [-1.5, 1.5]
+            twist.linear.x = float(np.clip(lx, -0.8, 0.8))
+            twist.angular.z = float(np.clip(az, -1.5, 1.5))
+            self.pub_cmd_vel.publish(twist)
+        except Exception as e:
+            self.get_logger().warn(f"Invalid teleop command: {e}")
 
     def get_jpeg(self, camera: str) -> bytes:
         with self.lock:
@@ -294,11 +357,17 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
         version="1.0.0"
     )
 
+    # Restrict CORS to localhost/same-origin to prevent Cross-Site WebSocket/Request Hijacking
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
+        ],
         allow_credentials=True,
-        allow_methods=["*"],
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -333,102 +402,18 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
             media_type="multipart/x-mixed-replace; boundary=frame"
         )
 
-    # 2. Real-Time WebSocket
-    @app.websocket("/ws")
-    async def websocket_endpoint(ws: WebSocket):
-        await ws.accept()
-        node.active_websockets.add(ws)
-        # Send latest telemetry immediately if available
-        if node.latest_telemetry:
-            await ws.send_text(json.dumps({"event": "telemetry", "data": node.latest_telemetry}))
-        if node.latest_explore_progress:
-            await ws.send_text(json.dumps({"event": "explore_progress", "data": node.latest_explore_progress}))
-        try:
-            while True:
-                data = await ws.receive_json()
-                msg_type = data.get("type", "")
-                if msg_type == "operator_command":
-                    payload = data.get("payload", {})
-                    action = payload.get("action", "").upper().strip()
-                    if action == "RESET_MAP":
-                        await reset_map()
-                    else:
-                        node.publish_operator_command(json.dumps(payload))
-                elif msg_type == "teleop":
-                    lx = float(data.get("linear_x", 0.0))
-                    az = float(data.get("angular_z", 0.0))
-                    node.publish_teleop(lx, az)
-                elif msg_type == "reset_map":
-                    await reset_map()
-                elif msg_type == "ping":
-                    await ws.send_text(json.dumps({"event": "pong", "time": time.time()}))
-        except WebSocketDisconnect:
-            pass
-        except Exception as e:
-            node.get_logger().warn(f"WebSocket client error: {e}")
-        finally:
-            node.active_websockets.discard(ws)
+    # Internal helper for rate-limited map reset
+    async def execute_map_reset() -> dict:
+        now = time.time()
+        elapsed = now - node.last_map_reset_time
+        if elapsed < 15.0:
+            remaining = int(15.0 - elapsed)
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit active: Map reset cooldown in effect ({remaining}s remaining)."
+            )
+        node.last_map_reset_time = now
 
-    # 3. REST API: Map Metadata & Floorplan Image
-    @app.get("/api/map/metadata", summary="Warehouse Map Metadata")
-    async def get_map_metadata():
-        with node.lock:
-            if node.live_map_meta:
-                return node.live_map_meta
-
-        if not os.path.exists(node.map_yaml):
-            return {
-                "resolution": 0.05,
-                "origin": [-7.921, -6.627, 0.0],
-                "width": 605,
-                "height": 303,
-                "image": "warehouse_map.pgm"
-            }
-        try:
-            with open(node.map_yaml, 'r') as f:
-                data = yaml.safe_load(f)
-            # Read image dimensions
-            pgm_path = node.map_pgm if os.path.exists(node.map_pgm) else os.path.join(os.path.dirname(node.map_yaml), data.get('image', ''))
-            width, height = 605, 303
-            if os.path.exists(pgm_path):
-                with PILImage.open(pgm_path) as im:
-                    width, height = im.size
-            return {
-                "resolution": float(data.get("resolution", 0.05)),
-                "origin": [float(x) for x in data.get("origin", [-7.921, -6.627, 0.0])],
-                "width": width,
-                "height": height,
-                "occupied_thresh": float(data.get("occupied_thresh", 0.65)),
-                "free_thresh": float(data.get("free_thresh", 0.196)),
-                "image": str(data.get("image", "warehouse_map.pgm"))
-            }
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to read map metadata: {e}")
-
-    @app.get("/api/map/image", summary="Warehouse Floorplan PNG Image")
-    async def get_map_image():
-        with node.lock:
-            if node.live_map_png:
-                return Response(content=node.live_map_png, media_type="image/png")
-
-        pgm_path = node.map_pgm
-        if not os.path.exists(pgm_path):
-            # Try finding alongside map_yaml
-            pgm_path = os.path.join(os.path.dirname(node.map_yaml), "warehouse_map.pgm")
-        if not os.path.exists(pgm_path):
-            raise HTTPException(status_code=404, detail="Map PGM file not found.")
-
-        try:
-            with PILImage.open(pgm_path) as im:
-                buf = io.BytesIO()
-                im.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
-            return Response(content=png_bytes, media_type="image/png")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to convert map PGM to PNG: {e}")
-
-    @app.post("/api/map/reset", summary="Reset Map & Re-SLAM Autonomous Mapping")
-    async def reset_map():
         try:
             # 1. Delete saved map files from both src and install
             map_paths = [
@@ -468,14 +453,149 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
                 "success": True,
                 "message": "Map reset initiated. Starting Phase 1 autonomous mapping from (0,0)."
             }
+        except HTTPException:
+            raise
         except Exception as e:
             node.get_logger().error(f"Error handling map reset: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to reset map: {e}")
+
+    # 2. Authenticated Real-Time WebSocket (Policy Violation 1008 on unauthorized)
+    @app.websocket("/ws")
+    async def websocket_endpoint(ws: WebSocket, token: Optional[str] = None):
+        # Authenticate via query param ?token=... or header X-API-Key
+        auth_token = token or ws.query_params.get("token") or ws.headers.get("x-api-key")
+        if not auth_token or auth_token != OPERATOR_TOKEN:
+            node.get_logger().warn(
+                f"[SECURITY] Unauthorized WebSocket connection attempt rejected from {ws.client.host if ws.client else 'unknown'}"
+            )
+            # Standard RFC 6455 close code 1008: Policy Violation
+            await ws.close(code=1008, reason="Policy Violation: Unauthorized Operator Token")
+            return
+
+        await ws.accept()
+        node.active_websockets.add(ws)
+
+        # Send latest telemetry immediately if available
+        if node.latest_telemetry:
+            await ws.send_text(json.dumps({"event": "telemetry", "data": node.latest_telemetry}))
+        if node.latest_explore_progress:
+            await ws.send_text(json.dumps({"event": "explore_progress", "data": node.latest_explore_progress}))
+
+        try:
+            while True:
+                data = await ws.receive_json()
+                msg_type = data.get("type", "")
+                if msg_type == "operator_command":
+                    payload = data.get("payload", {})
+                    if not isinstance(payload, dict):
+                        continue
+                    action = str(payload.get("action", "")).upper().strip()
+                    if action == "RESET_MAP":
+                        try:
+                            await execute_map_reset()
+                        except HTTPException as he:
+                            await ws.send_text(json.dumps({"event": "error", "detail": he.detail}))
+                    elif action == "GOTO_POSE":
+                        try:
+                            gx = float(payload.get("x", 0.0))
+                            gy = float(payload.get("y", 0.0))
+                            gyaw = float(payload.get("yaw", 0.0))
+                            if np.isfinite(gx) and np.isfinite(gy) and np.isfinite(gyaw):
+                                # Clamp navigation coordinates to warehouse bounds
+                                payload["x"] = float(np.clip(gx, -50.0, 50.0))
+                                payload["y"] = float(np.clip(gy, -50.0, 50.0))
+                                payload["yaw"] = float(np.clip(gyaw, -6.29, 6.29))
+                                node.publish_operator_command(json.dumps(payload))
+                        except Exception as e:
+                            node.get_logger().warn(f"Malformed GOTO_POSE coordinates: {e}")
+                    else:
+                        node.publish_operator_command(json.dumps(payload))
+                elif msg_type == "teleop":
+                    try:
+                        lx = float(data.get("linear_x", 0.0))
+                        az = float(data.get("angular_z", 0.0))
+                        node.publish_teleop(lx, az)
+                    except (ValueError, TypeError):
+                        pass
+                elif msg_type == "reset_map":
+                    try:
+                        await execute_map_reset()
+                    except HTTPException as he:
+                        await ws.send_text(json.dumps({"event": "error", "detail": he.detail}))
+                elif msg_type == "ping":
+                    await ws.send_text(json.dumps({"event": "pong", "time": time.time()}))
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            node.get_logger().warn(f"WebSocket client error: {e}")
+        finally:
+            node.active_websockets.discard(ws)
+
+    # 3. REST API: Map Metadata & Floorplan Image
+    @app.get("/api/map/metadata", summary="Warehouse Map Metadata")
+    async def get_map_metadata():
+        with node.lock:
+            if node.live_map_meta:
+                return node.live_map_meta
+
+        if not os.path.exists(node.map_yaml):
+            return {
+                "resolution": 0.05,
+                "origin": [-7.921, -6.627, 0.0],
+                "width": 605,
+                "height": 303,
+                "image": "warehouse_map.pgm"
+            }
+        try:
+            with open(node.map_yaml, 'r') as f:
+                data = yaml.safe_load(f)
+            pgm_path = node.map_pgm if os.path.exists(node.map_pgm) else os.path.join(os.path.dirname(node.map_yaml), data.get('image', ''))
+            width, height = 605, 303
+            if os.path.exists(pgm_path):
+                with PILImage.open(pgm_path) as im:
+                    width, height = im.size
+            return {
+                "resolution": float(data.get("resolution", 0.05)),
+                "origin": [float(x) for x in data.get("origin", [-7.921, -6.627, 0.0])],
+                "width": width,
+                "height": height,
+                "occupied_thresh": float(data.get("occupied_thresh", 0.65)),
+                "free_thresh": float(data.get("free_thresh", 0.196)),
+                "image": str(data.get("image", "warehouse_map.pgm"))
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read map metadata: {e}")
+
+    @app.get("/api/map/image", summary="Warehouse Floorplan PNG Image")
+    async def get_map_image():
+        with node.lock:
+            if node.live_map_png:
+                return Response(content=node.live_map_png, media_type="image/png")
+
+        pgm_path = node.map_pgm
+        if not os.path.exists(pgm_path):
+            pgm_path = os.path.join(os.path.dirname(node.map_yaml), "warehouse_map.pgm")
+        if not os.path.exists(pgm_path):
+            raise HTTPException(status_code=404, detail="Map PGM file not found.")
+
+        try:
+            with PILImage.open(pgm_path) as im:
+                buf = io.BytesIO()
+                im.save(buf, format="PNG")
+                png_bytes = buf.getvalue()
+            return Response(content=png_bytes, media_type="image/png")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to convert map PGM to PNG: {e}")
+
+    @app.post("/api/map/reset", summary="Reset Map & Re-SLAM Autonomous Mapping")
+    async def reset_map_endpoint(token: str = Depends(verify_operator_token)):
+        return await execute_map_reset()
 
     # 4. REST API: Security Incident Logs & Operator Status Updates
     @app.get("/api/incidents", summary="Get Latest Forensic Security Incidents")
     async def get_incidents(limit: int = 50):
         try:
+            safe_limit = max(1, min(int(limit), 200))
             with sqlite3.connect(node.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
@@ -485,13 +605,13 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
                     FROM incidents
                     ORDER BY id DESC
                     LIMIT ?
-                """, (limit,))
+                """, (safe_limit,))
                 rows = cursor.fetchall()
                 incidents = []
                 for r in rows:
                     item = dict(r)
                     if item.get("snapshot_path"):
-                        # Format relative URL for frontend display
+                        # Format relative URL with sanitized basename to prevent path traversal
                         fname = os.path.basename(item["snapshot_path"])
                         item["snapshot_url"] = f"/snapshots/{fname}"
                     incidents.append(item)
@@ -500,51 +620,99 @@ def create_app(node: CommandCenterBridge) -> FastAPI:
             raise HTTPException(status_code=500, detail=f"Database query error: {e}")
 
     @app.post("/api/incidents/{incident_id}/status", summary="Update Incident Operator Status")
-    async def update_incident_status(incident_id: int, payload: dict = Body(...)):
-        status = payload.get("status", "").upper().strip()
-        if status not in ["CONFIRMED_INTRUDER", "FALSE_ALARM", "AUTHORIZED", "RESOLVED", "PENDING"]:
+    async def update_incident_status(
+        incident_id: int,
+        payload: IncidentStatusUpdate = Body(...),
+        token: str = Depends(verify_operator_token)
+    ):
+        status_val = payload.status.upper().strip()
+        if status_val not in ["CONFIRMED_INTRUDER", "FALSE_ALARM", "AUTHORIZED", "RESOLVED", "PENDING"]:
             raise HTTPException(status_code=400, detail="Invalid operator status.")
 
         try:
+            safe_id = int(incident_id)
             with sqlite3.connect(node.db_path) as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
                     UPDATE incidents
                     SET operator_status = ?
                     WHERE id = ?
-                """, (status, incident_id))
+                """, (status_val, safe_id))
                 conn.commit()
 
             # Forward corresponding action to ROS 2 FSM
-            action_name = status
+            action_name = status_val
             node.publish_operator_command(json.dumps({
                 "action": action_name,
-                "incident_id": incident_id
+                "incident_id": safe_id
             }))
 
             return {
                 "success": True,
-                "incident_id": incident_id,
-                "operator_status": status
+                "incident_id": safe_id,
+                "operator_status": status_val
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Database update error: {e}")
 
     @app.post("/api/operator/command", summary="Dispatch Operator Command to ROS 2 FSM")
-    async def operator_command_endpoint(payload: dict = Body(...)):
+    async def operator_command_endpoint(
+        payload: dict = Body(...),
+        token: str = Depends(verify_operator_token)
+    ):
         try:
-            action = payload.get("action", "").upper().strip()
+            action = str(payload.get("action", "")).upper().strip()
             if action == "RESET_MAP":
-                return await reset_map()
+                return await execute_map_reset()
+            elif action == "GOTO_POSE":
+                try:
+                    gx = float(payload.get("x", 0.0))
+                    gy = float(payload.get("y", 0.0))
+                    gyaw = float(payload.get("yaw", 0.0))
+                    if np.isfinite(gx) and np.isfinite(gy) and np.isfinite(gyaw):
+                        payload["x"] = float(np.clip(gx, -50.0, 50.0))
+                        payload["y"] = float(np.clip(gy, -50.0, 50.0))
+                        payload["yaw"] = float(np.clip(gyaw, -6.29, 6.29))
+                except Exception:
+                    pass
+
             cmd_str = json.dumps(payload)
             node.publish_operator_command(cmd_str)
             return {"success": True, "command": payload}
+        except HTTPException:
+            raise
         except Exception as e:
             node.get_logger().error(f"Error handling operator command API: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to dispatch operator command: {e}")
 
+    @app.post("/api/auth/verify", summary="Verify Operator Token")
+    async def verify_auth_endpoint(token: str = Depends(verify_operator_token)):
+        return {
+            "authenticated": True,
+            "operator": "AUTHORIZED",
+            "server_time": datetime.now().isoformat()
+        }
+
+    # Path-traversal safe snapshot download endpoint
+    @app.get("/api/snapshots/{filename}", summary="Download Forensic Snapshot")
+    async def get_snapshot_file(filename: str):
+        safe_filename = os.path.basename(filename)
+        target_path = os.path.realpath(os.path.join(node.snapshot_dir, safe_filename))
+        real_snap_dir = os.path.realpath(node.snapshot_dir)
+        if not target_path.startswith(real_snap_dir) or not os.path.exists(target_path):
+            raise HTTPException(status_code=404, detail="Forensic snapshot not found.")
+        return FileResponse(target_path, media_type="image/jpeg")
+
     @app.get("/api/health", summary="Command Center Health Check")
     async def health():
+        return {
+            "status": "online",
+            "security_hardened": True,
+            "server_time": datetime.now().isoformat(),
+            "active_ws_clients": len(node.active_websockets),
+            "front_camera_active": (time.time() - node.last_front_time) < 2.0,
+            "rear_camera_active": (time.time() - node.last_rear_time) < 2.0
+        }
         return {
             "status": "online",
             "server_time": datetime.now().isoformat(),

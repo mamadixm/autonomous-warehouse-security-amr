@@ -509,6 +509,96 @@
       border: 2px solid var(--accent-cyan);
       box-shadow: 0 0 30px rgba(6, 182, 212, 0.5);
     }
+
+    /* Operator Security Login Modal */
+    #authModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(10, 14, 23, 0.94);
+      backdrop-filter: blur(8px);
+      z-index: 300;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    #authModal.active { display: flex; }
+    .auth-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--accent-cyan);
+      box-shadow: 0 0 40px rgba(6, 182, 212, 0.4);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 440px;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .auth-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .auth-header h2 {
+      font-size: 1.15rem;
+      color: var(--text-main);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .auth-desc {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+    .auth-input-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .auth-input-group label {
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--accent-cyan);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .auth-input {
+      background: #1f2937;
+      border: 1px solid #4b5563;
+      border-radius: 6px;
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 0.95rem;
+      font-family: monospace;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .auth-input:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 8px rgba(6, 182, 212, 0.4);
+    }
+    .auth-btn {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 12px;
+      font-weight: 700;
+      font-size: 0.9rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.4);
+      transition: opacity 0.2s;
+    }
+    .auth-btn:hover { opacity: 0.9; }
+    .auth-error {
+      color: var(--accent-red);
+      font-size: 0.8rem;
+      font-weight: 600;
+      display: none;
+    }
   </style>
 </head>
 <body>
@@ -581,6 +671,12 @@
       <div class="stat-badge">
         <span class="stat-label">Patrol:</span>
         <span class="stat-value" id="waypointText">WP 1 / 4</span>
+      </div>
+
+      <!-- Operator Auth Status -->
+      <div class="stat-badge" id="operatorAuthBadge" style="cursor: pointer;" title="Click to view/change Operator Token">
+        <span class="stat-label">OPERATOR:</span>
+        <span class="stat-value" id="operatorAuthText" style="color: var(--accent-green);">AUTHORIZED</span>
       </div>
     </div>
   </header>
@@ -777,7 +873,136 @@
     <img id="modalImg" src="" alt="Snapshot Preview">
   </div>
 
+  <!-- Operator Security Login Modal -->
+  <div id="authModal">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="brand-icon">🔐</div>
+        <h2>Operator Security Gate</h2>
+      </div>
+      <div class="auth-desc">
+        Command Center is security-hardened. Enter your authorized Operator Token to access live telemetry, WebSocket stream, and manual mission controls.
+      </div>
+      <div class="auth-input-group">
+        <label for="operatorTokenInput">Operator Security Token</label>
+        <input type="password" id="operatorTokenInput" class="auth-input" placeholder="e.g. amr-sec-2026" autocomplete="current-password">
+      </div>
+      <div class="auth-error" id="authError">Invalid operator token. Access denied.</div>
+      <button class="auth-btn" id="btnSubmitAuth">Authenticate & Connect</button>
+    </div>
+  </div>
+
   <script>
+    // =========================================================================
+    // Operator Security Token & Authentication Management
+    // =========================================================================
+    const TOKEN_KEY = "amr_operator_token";
+    const DEFAULT_TOKEN = "amr-sec-2026";
+    const authModal = document.getElementById('authModal');
+    const operatorTokenInput = document.getElementById('operatorTokenInput');
+    const authError = document.getElementById('authError');
+    const btnSubmitAuth = document.getElementById('btnSubmitAuth');
+    const operatorAuthBadge = document.getElementById('operatorAuthBadge');
+    const operatorAuthText = document.getElementById('operatorAuthText');
+
+    function getOperatorToken() {
+      let t = sessionStorage.getItem(TOKEN_KEY);
+      if (!t) {
+        t = DEFAULT_TOKEN;
+        sessionStorage.setItem(TOKEN_KEY, t);
+      }
+      return t;
+    }
+
+    function setOperatorToken(tok) {
+      sessionStorage.setItem(TOKEN_KEY, tok);
+      updateOperatorBadge(true);
+    }
+
+    function updateOperatorBadge(isAuth) {
+      if (!operatorAuthText) return;
+      if (isAuth) {
+        operatorAuthText.textContent = "AUTHORIZED";
+        operatorAuthText.style.color = "var(--accent-green)";
+      } else {
+        operatorAuthText.textContent = "LOCKED";
+        operatorAuthText.style.color = "var(--accent-red)";
+      }
+    }
+
+    function showAuthModal(errMsg = null) {
+      if (errMsg) {
+        authError.textContent = errMsg;
+        authError.style.display = 'block';
+      } else {
+        authError.style.display = 'none';
+      }
+      operatorTokenInput.value = sessionStorage.getItem(TOKEN_KEY) || DEFAULT_TOKEN;
+      authModal.classList.add('active');
+      updateOperatorBadge(false);
+    }
+
+    function hideAuthModal() {
+      authModal.classList.remove('active');
+    }
+
+    if (operatorAuthBadge) {
+      operatorAuthBadge.onclick = () => { showAuthModal(); };
+    }
+
+    async function handleAuthSubmit() {
+      const entered = operatorTokenInput.value.trim();
+      if (!entered) return;
+
+      try {
+        const res = await fetch('/api/auth/verify', {
+          method: 'POST',
+          headers: { 'X-API-Key': entered }
+        });
+        if (res.ok) {
+          setOperatorToken(entered);
+          hideAuthModal();
+          if (ws) ws.close();
+          connectWebSocket();
+          fetchIncidents();
+          loadMap();
+        } else {
+          authError.textContent = "Unauthorized: Invalid Operator Token.";
+          authError.style.display = 'block';
+        }
+      } catch (e) {
+        setOperatorToken(entered);
+        hideAuthModal();
+        if (ws) ws.close();
+        connectWebSocket();
+      }
+    }
+
+    if (btnSubmitAuth) {
+      btnSubmitAuth.onclick = handleAuthSubmit;
+    }
+    if (operatorTokenInput) {
+      operatorTokenInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleAuthSubmit();
+      });
+    }
+
+    // Centralized Authenticated Fetch Wrapper
+    async function authFetch(url, options = {}) {
+      const tok = getOperatorToken();
+      options.headers = options.headers || {};
+      if (options.headers instanceof Headers) {
+        options.headers.set('X-API-Key', tok);
+      } else {
+        options.headers['X-API-Key'] = tok;
+      }
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        showAuthModal("Session Expired or Unauthorized Operator Token.");
+      }
+      return res;
+    }
+
     // =========================================================================
     // WebSocket & Real-Time Telemetry Management
     // =========================================================================
@@ -796,13 +1021,16 @@
     const waypointText = document.getElementById('waypointText');
 
     function connectWebSocket() {
-      const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
+      const tok = getOperatorToken();
+      const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + 
+                    window.location.host + '/ws?token=' + encodeURIComponent(tok);
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
         wsDot.classList.add('online');
         wsStatusText.textContent = 'CONNECTED';
         wsStatusText.style.color = '#10b981';
+        updateOperatorBadge(true);
         if (reconnectTimer) clearInterval(reconnectTimer);
       };
 
@@ -824,16 +1052,26 @@
             loadMap();
           } else if (payload.event === 'mission_stage') {
             updateMissionStage(payload.data);
+          } else if (payload.event === 'error') {
+            console.warn("WebSocket Server Error:", payload.detail);
           }
         } catch (e) {
           console.error("WS Parse error:", e);
         }
       };
 
-      ws.onclose = () => {
+      ws.onclose = (evt) => {
         wsDot.classList.remove('online');
-        wsStatusText.textContent = 'RECONNECTING...';
+        wsStatusText.textContent = 'DISCONNECTED';
         wsStatusText.style.color = '#ef4444';
+
+        if (evt.code === 1008) {
+          // RFC 6455 1008: Policy Violation (Unauthorized Token)
+          updateOperatorBadge(false);
+          showAuthModal("WebSocket Access Denied: Unauthorized Operator Security Token.");
+          return;
+        }
+
         if (!reconnectTimer) {
           reconnectTimer = setInterval(connectWebSocket, 2000);
         }
@@ -856,13 +1094,17 @@
         }
       }
 
-      // Fallback to HTTP REST only if WebSocket is not open
-      fetch("/api/operator/command", {
+      // Fallback to Authenticated HTTP REST only if WebSocket is not open
+      authFetch("/api/operator/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(actionPayload)
       }).then(r => r.json()).then(data => {
         console.log("Operator command acknowledged via HTTP:", data);
+      }).catch(err => {
+        console.error("Failed to send operator command:", err);
+      });
+    }
       }).catch(err => {
         console.error("Failed to send operator command:", err);
       });
@@ -1191,7 +1433,12 @@
         if (!ok) return;
 
         try {
-          const res = await fetch('/api/map/reset', { method: 'POST' });
+          const res = await authFetch('/api/map/reset', { method: 'POST' });
+          if (res.status === 429) {
+            const errData = await res.json().catch(() => ({}));
+            alert("⚠️ " + (errData.detail || "Rate limit active: Please wait 15 seconds between map resets."));
+            return;
+          }
           const data = await res.json();
           if (data.success) {
             updateSlamProgress(0.0, "STAGE 1: MAPPING");
@@ -1348,7 +1595,7 @@
 
     async function updateIncidentStatus(id, status) {
       try {
-        await fetch(`/api/incidents/${id}/status`, {
+        await authFetch(`/api/incidents/${id}/status`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ status: status })

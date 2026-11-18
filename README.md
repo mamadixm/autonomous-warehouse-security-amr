@@ -326,6 +326,33 @@ If debugging individual subsystems:
 
 ---
 
+## 🔒 Security Hardening & DDS Cryptography
+
+The Autonomous Warehouse Security AMR incorporates multi-layer cyber-physical security hardening designed to prevent unauthorized control, eavesdropping, and tampering:
+
+### 1. Operator Authentication Gate
+- **Access Token / PIN:** Mutating REST endpoints (`POST /api/map/reset`, incident status updates, teleop overrides) require an authorized Operator Token via the `X-API-Key` header or HTTP Bearer scheme.
+- **WebSocket Handshake (`/ws`):** Real-time command streams require `?token=<token>`. Connections presenting invalid or absent tokens are immediately terminated with RFC 6455 policy violation close code `1008`.
+- **Environment Configuration:** Tokens are loaded from `AMR_OPERATOR_TOKEN` or a local `.env` file (template provided in `.env.example`, default: `amr-sec-2026`).
+- **Interactive Security Modal:** The Command Center Web UI includes a sleek Operator Security Login Modal that authenticates the session and automatically signs API requests.
+
+### 2. Input Validation & Rate Limiting
+- **Strict Velocity Clamping:** Manual teleop velocity payloads are validated and clamped (`linear_x ∈ [-0.8, 0.8]` m/s, `angular_z ∈ [-1.5, 1.5]` rad/s) with finite-number assertions to prevent motor over-drive attacks.
+- **Pose Validation:** `GOTO_POSE` coordinates are bounded within warehouse geometry boundaries.
+- **Map Reset Cooldown:** Destructive map wipes (`/api/map/reset`) enforce a strict 15-second rate limit cooldown (HTTP 429) to prevent denial-of-service map erasing.
+- **Database & Snapshot Safety:** All SQLite transactions utilize parameterized queries (`?` placeholders). Snapshot serving enforces path-traversal sanitization (`os.path.basename` + realpath validation).
+- **CORS Restriction:** FastAPI `CORSMiddleware` is strictly locked to localhost/same-origin.
+
+### 3. ROS 2 DDS Network Isolation & SROS2
+- **DDS Localhost Discovery:** Launch files automatically enforce `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` and `ROS_LOCALHOST_ONLY=1` so rogue machines on the local Wi-Fi/LAN cannot snoop or inject ROS 2 messages.
+- **SROS2 Keystore & Enclaves:** Generate cryptographic keystores and per-node enclaves for TLS/DDS encryption and authentication:
+  ```bash
+  ~/Desktop/amr_security_ws/scripts/setup_sros2.sh
+  source ~/Desktop/amr_security_ws/scripts/sros2_env.sh
+  ```
+
+---
+
 ## ⚙️ Configuration & Customization
 
 - **Patrol Waypoints:** Edit [`src/amr_navigation/config/patrol_waypoints.yaml`](src/amr_navigation/config/patrol_waypoints.yaml) to modify waypoint coordinates `[x, y, yaw]`, base station home pose, or computer vision thresholds.

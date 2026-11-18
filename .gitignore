@@ -33,3 +33,9 @@ data/snapshots/*.png
 data/*.db
 !data/snapshots/.gitkeep
 *.mapping_complete
+
+# Security & Environment Config
+.env
+.env.local
+keystores/
+sros2_keystore/
